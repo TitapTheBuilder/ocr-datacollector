@@ -1,0 +1,29 @@
+# fly.toml - Fly.io configuration
+# Run: fly launch (first time), fly deploy (subsequent)
+
+app = "ocr-datacollector"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[mounts]
+  source = "ocr_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

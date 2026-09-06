@@ -10,8 +10,9 @@ RUN npm ci --omit=dev
 
 COPY . .
 
-# Create data directories
-RUN mkdir -p data uploads/pending uploads/approved
+# Persistent data path (Fly.io volume mounts at /data)
+ENV PERSISTENT_DATA_PATH=/data
+RUN mkdir -p /data/uploads/pending /data/uploads/approved /data/data
 
 EXPOSE 3000
 
