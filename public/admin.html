@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>پنل مدیریت - مجموعه داده OCR</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header class="admin-header">
+    <h1>پنل مدیریت مجموعه داده OCR</h1>
+    <div>
+      <button id="btnLogout" class="btn btn-sm btn-outline" style="color:white; border-color:rgba(255,255,255,0.3); display:none;">خروج</button>
+    </div>
+  </header>
+
+  <!-- Login -->
+  <div id="loginSection" class="login-card">
+    <h2>ورود به پنل مدیریت</h2>
+    <div id="loginError" class="status-msg error" style="display:block; margin-bottom:16px;"></div>
+    <form id="loginForm">
+      <div class="form-group">
+        <label>نام کاربری</label>
+        <input type="text" id="loginUsername" class="form-input" required autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label>رمز عبور</label>
+        <input type="password" id="loginPassword" class="form-input" required autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">ورود</button>
+    </form>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboardSection" class="admin-content" style="display:none;">
+
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-value" id="statTotal">0</div>
+        <div class="stat-label">کل تصاویر</div>
+      </div>
+      <div class="stat-card pending">
+        <div class="stat-value" id="statPending">0</div>
+        <div class="stat-label">در انتظار بررسی</div>
+      </div>
+      <div class="stat-card approved">
+        <div class="stat-value" id="statApproved">0</div>
+        <div class="stat-label">تایید شده</div>
+      </div>
+      <div class="stat-card rejected">
+        <div class="stat-value" id="statRejected">0</div>
+        <div class="stat-label">رد شده</div>
+      </div>
+      <div class="stat-card synced">
+        <div class="stat-value" id="statSynced">0</div>
+        <div class="stat-label">همگام‌شده با درایو</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statContributors">0</div>
+        <div class="stat-label">مشارکت‌کنندگان</div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" data-tab="pending">در انتظار بررسی</button>
+      <button class="tab" data-tab="all">همه تصاویر</button>
+      <button class="tab" data-tab="prompts">مدیریت متن‌ها</button>
+      <button class="tab" data-tab="sync">همگام‌سازی</button>
+    </div>
+
+    <!-- Pending Tab -->
+    <div id="tabPending" class="tab-content active">
+      <div id="pendingGrid" class="image-grid"></div>
+      <div id="pendingEmpty" class="empty-state" style="display:none;">
+        <p>تصویری در انتظار بررسی نیست</p>
+      </div>
+      <div id="pendingPagination" class="pagination"></div>
+    </div>
+
+    <!-- All Images Tab -->
+    <div id="tabAll" class="tab-content">
+      <div style="margin-bottom:16px;">
+        <select id="filterStatus" class="form-input" style="width:auto; display:inline-block;">
+          <option value="">همه</option>
+          <option value="pending">در انتظار</option>
+          <option value="approved">تایید شده</option>
+          <option value="rejected">رد شده</option>
+        </select>
+      </div>
+      <div id="allGrid" class="image-grid"></div>
+      <div id="allEmpty" class="empty-state" style="display:none;">
+        <p>تصویری یافت نشد</p>
+      </div>
+      <div id="allPagination" class="pagination"></div>
+    </div>
+
+    <!-- Prompts Tab -->
+    <div id="tabPrompts" class="tab-content">
+      <div class="prompts-section">
+        <div class="prompts-header">
+          <h3>متن‌های نمایشی</h3>
+          <div class="csv-upload">
+            <select id="csvCategory" class="form-input" style="width:auto;">
+              <option value="numbers">اعداد</option>
+              <option value="words">کلمات</option>
+              <option value="sentences">جملات</option>
+              <option value="custom">سفارشی</option>
+            </select>
+            <label for="csvInput" class="btn btn-sm btn-primary">آپلود CSV</label>
+            <input type="file" id="csvInput" class="file-input" accept=".csv,.txt">
+          </div>
+        </div>
+        <table class="prompts-table">
+          <thead>
+            <tr>
+              <th>متن</th>
+              <th>دسته</th>
+              <th>وضعیت</th>
+              <th>عملیات</th>
+            </tr>
+          </thead>
+          <tbody id="promptsList"></tbody>
+        </table>
+        <div id="promptsEmpty" class="empty-state" style="display:none;">
+          <p>هنوز متنی اضافه نشده است</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sync Tab -->
+    <div id="tabSync" class="tab-content">
+      <div class="prompts-section">
+        <div class="prompts-header">
+          <h3>همگام‌سازی با Google Drive</h3>
+          <div>
+            <button id="btnSyncAll" class="btn btn-primary btn-sm">همگام‌سازی همه تصاویر تایید شده</button>
+            <a href="/api/admin/export" class="btn btn-outline btn-sm" target="_blank">دانلود CSV خروجی</a>
+          </div>
+        </div>
+        <p style="color:var(--gray-500); font-size:0.9rem;">
+          تصاویر تایید شده‌ای که هنوز به Google Drive ارسال نشده‌اند در اینجا نمایش داده می‌شوند.
+        </p>
+        <div id="syncGrid" class="image-grid" style="margin-top:16px;"></div>
+        <div id="syncEmpty" class="empty-state" style="display:none;">
+          <p>همه تصاویر تایید شده همگام‌سازی شده‌اند</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Image Modal -->
+  <div id="imageModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <span id="modalTitle">تصویر</span>
+        <button class="modal-close" id="modalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <img id="modalImg" src="" alt="">
+        <div id="modalInfo" style="margin-bottom:16px;"></div>
+        <div class="modal-actions" id="modalActions"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "name": "ocr-datacollector",
+  "version": "1.0.0",
+  "description": "Persian handwriting OCR data collection tool",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "generate-password": "node -e \"const c=require('crypto');const salt=c.randomBytes(16).toString('hex');const hash=c.scryptSync(process.argv[1]||'admin123',salt,64).toString('hex');console.log('ADMIN_PASSWORD_HASH='+salt+':'+hash)\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "csv-parse": "^5.5.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "googleapis": "^140.0.0",
+    "multer": "^1.4.5-lts.1"
+  }
+}
