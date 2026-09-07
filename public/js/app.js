@@ -268,6 +268,295 @@
 
   btnRetake.addEventListener('click', resetCapture);
 
+  // --- Whiteboard & Mode Switching ---
+  const tabModeWhiteboard = document.getElementById('tabModeWhiteboard');
+  const tabModeUpload = document.getElementById('tabModeUpload');
+  const whiteboardSection = document.getElementById('whiteboardSection');
+  const uploadSection = document.getElementById('uploadSection');
+  const whiteboardCanvas = document.getElementById('whiteboardCanvas');
+  const canvasPlaceholder = document.getElementById('canvasPlaceholder');
+  const toolPen = document.getElementById('toolPen');
+  const toolEraser = document.getElementById('toolEraser');
+  const btnUndo = document.getElementById('btnUndo');
+  const btnClear = document.getElementById('btnClear');
+  const btnSubmitWhiteboard = document.getElementById('btnSubmitWhiteboard');
+  const widthBtns = document.querySelectorAll('.width-btn');
+  const colorBtns = document.querySelectorAll('.color-btn');
+
+  // Mode switching
+  function switchMode(mode) {
+    if (mode === 'whiteboard') {
+      tabModeWhiteboard.classList.add('active');
+      tabModeUpload.classList.remove('active');
+      whiteboardSection.style.display = 'block';
+      uploadSection.style.display = 'none';
+      initCanvasSize();
+    } else {
+      tabModeUpload.classList.add('active');
+      tabModeWhiteboard.classList.remove('active');
+      uploadSection.style.display = 'block';
+      whiteboardSection.style.display = 'none';
+    }
+  }
+
+  tabModeWhiteboard.addEventListener('click', () => switchMode('whiteboard'));
+  tabModeUpload.addEventListener('click', () => switchMode('upload'));
+
+  // Canvas state
+  let ctx = null;
+  let dpr = window.devicePixelRatio || 1;
+  let isDrawing = false;
+  let strokes = []; // Array of { tool, color, width, points: [{x, y}] }
+  let currentStroke = null;
+  let currentTool = 'pen'; // 'pen' | 'eraser'
+  let currentWidth = 6;
+  let currentColor = '#111827';
+  let cssWidth = 0;
+  let cssHeight = 280;
+
+  function initCanvasSize() {
+    if (!whiteboardCanvas) return;
+    const rect = whiteboardCanvas.getBoundingClientRect();
+    const newCssWidth = Math.floor(rect.width) || whiteboardCanvas.parentElement.clientWidth || 500;
+    cssHeight = 280;
+
+    // Only reinitialize if size actually changed or first load
+    if (newCssWidth !== cssWidth || !ctx) {
+      cssWidth = newCssWidth;
+      dpr = window.devicePixelRatio || 1;
+      whiteboardCanvas.width = Math.floor(cssWidth * dpr);
+      whiteboardCanvas.height = Math.floor(cssHeight * dpr);
+      ctx = whiteboardCanvas.getContext('2d');
+      redrawAll();
+    }
+  }
+
+  function redrawAll() {
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // Fill clean white background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, whiteboardCanvas.width, whiteboardCanvas.height);
+
+    // Apply scale for High-DPI
+    ctx.scale(dpr, dpr);
+
+    // Draw all strokes
+    for (const stroke of strokes) {
+      drawStroke(stroke);
+    }
+
+    // Toggle placeholder
+    if (strokes.length === 0 && !isDrawing) {
+      canvasPlaceholder.classList.remove('hidden');
+    } else {
+      canvasPlaceholder.classList.add('hidden');
+    }
+  }
+
+  function drawStroke(stroke) {
+    if (!stroke.points || stroke.points.length === 0) return;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.strokeStyle = stroke.tool === 'eraser' ? '#ffffff' : stroke.color;
+    ctx.lineWidth = stroke.tool === 'eraser' ? stroke.width * 2.5 : stroke.width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    const pts = stroke.points;
+    if (pts.length === 1) {
+      ctx.arc(pts[0].x, pts[0].y, (ctx.lineWidth) / 2, 0, Math.PI * 2);
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.fill();
+    } else if (pts.length === 2) {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.stroke();
+    } else {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length - 1; i++) {
+        const xc = (pts[i].x + pts[i + 1].x) / 2;
+        const yc = (pts[i].y + pts[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, xc, yc);
+      }
+      ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function getCanvasCoords(e) {
+    const rect = whiteboardCanvas.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  }
+
+  // Pointer event listeners
+  whiteboardCanvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    whiteboardCanvas.setPointerCapture(e.pointerId);
+    isDrawing = true;
+    const pt = getCanvasCoords(e);
+    currentStroke = {
+      tool: currentTool,
+      color: currentColor,
+      width: currentWidth,
+      points: [pt],
+    };
+    strokes.push(currentStroke);
+    canvasPlaceholder.classList.add('hidden');
+    redrawAll();
+  });
+
+  whiteboardCanvas.addEventListener('pointermove', (e) => {
+    if (!isDrawing || !currentStroke) return;
+    e.preventDefault();
+    const pt = getCanvasCoords(e);
+    currentStroke.points.push(pt);
+    redrawAll();
+  });
+
+  function endDrawing(e) {
+    if (!isDrawing) return;
+    isDrawing = false;
+    currentStroke = null;
+    try {
+      whiteboardCanvas.releasePointerCapture(e.pointerId);
+    } catch {}
+    redrawAll();
+  }
+
+  whiteboardCanvas.addEventListener('pointerup', endDrawing);
+  whiteboardCanvas.addEventListener('pointercancel', endDrawing);
+
+  // Tool buttons
+  toolPen.addEventListener('click', () => {
+    currentTool = 'pen';
+    toolPen.classList.add('active');
+    toolEraser.classList.remove('active');
+  });
+
+  toolEraser.addEventListener('click', () => {
+    currentTool = 'eraser';
+    toolEraser.classList.add('active');
+    toolPen.classList.remove('active');
+  });
+
+  // Width buttons
+  widthBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      widthBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentWidth = parseInt(btn.dataset.width, 10) || 6;
+    });
+  });
+
+  // Color buttons
+  colorBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      colorBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentColor = btn.dataset.color || '#111827';
+      currentTool = 'pen';
+      toolPen.classList.add('active');
+      toolEraser.classList.remove('active');
+    });
+  });
+
+  // Undo button
+  btnUndo.addEventListener('click', () => {
+    if (strokes.length > 0) {
+      strokes.pop();
+      redrawAll();
+    }
+  });
+
+  // Clear button
+  btnClear.addEventListener('click', () => {
+    strokes = [];
+    redrawAll();
+  });
+
+  // Resize listener
+  window.addEventListener('resize', () => {
+    initCanvasSize();
+  });
+
+  // Submit from whiteboard
+  btnSubmitWhiteboard.addEventListener('click', async () => {
+    if (strokes.length === 0) {
+      showStatus('لطفاً ابتدا متنی روی تخته بنویسید.', 'error');
+      return;
+    }
+
+    let promptId = null;
+    let customText = null;
+
+    if (customMode) {
+      customText = customTextInput.value.trim();
+      if (!customText) {
+        showStatus('لطفاً ابتدا متن دست‌نویس خود را تایپ کنید.', 'error');
+        customTextInput.focus();
+        return;
+      }
+    } else {
+      if (!currentPrompt) {
+        showStatus('متن پیشنهادی فعالی وجود ندارد. لطفاً از گزینه «متن دلخواه» استفاده کنید.', 'error');
+        return;
+      }
+      promptId = currentPrompt.id;
+    }
+
+    btnSubmitWhiteboard.disabled = true;
+    btnSubmitWhiteboard.innerHTML = '<span class="spinner"></span> در حال ارسال...';
+
+    // Convert canvas to JPEG blob
+    whiteboardCanvas.toBlob(async (blob) => {
+      if (!blob) {
+        showStatus('خطا در تبدیل تصویر تخته.', 'error');
+        btnSubmitWhiteboard.disabled = false;
+        btnSubmitWhiteboard.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> تایید و ارسال دست‌نویس';
+        return;
+      }
+
+      try {
+        const formData = new FormData();
+        formData.append('contributor_id', contributorId);
+        if (promptId) formData.append('prompt_id', promptId);
+        if (customText) formData.append('custom_text', customText);
+        formData.append('image', blob, `whiteboard_${Date.now()}.jpg`);
+
+        const res = await fetch('/api/images', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (data.success) {
+          showStatus('دست‌نوشته شما با موفقیت ثبت شد! متشکریم.', 'success');
+          // Clear whiteboard for next entry
+          strokes = [];
+          redrawAll();
+
+          if (customMode) {
+            customTextInput.value = '';
+            updatePreviewLabel();
+          } else {
+            loadPrompt();
+          }
+          loadStats();
+        } else {
+          showStatus(data.error || 'خطا در ارسال دست‌نوشته', 'error');
+        }
+      } catch {
+        showStatus('خطا در ارسال دست‌نوشته به سرور. لطفاً اتصال اینترنت را بررسی کنید.', 'error');
+      } finally {
+        btnSubmitWhiteboard.disabled = false;
+        btnSubmitWhiteboard.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> تایید و ارسال دست‌نویس';
+      }
+    }, 'image/jpeg', 0.92);
+  });
+
   // --- Custom Text Toggle ---
   customTextToggle.addEventListener('click', () => {
     customMode = !customMode;
@@ -293,4 +582,5 @@
   // --- Init ---
   loadPrompt();
   loadStats();
+  initCanvasSize();
 })();

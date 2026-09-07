@@ -251,6 +251,242 @@ body {
   border-top: 1px solid var(--gray-200);
 }
 
+/* Mode Switcher Tabs */
+.mode-tabs {
+  display: flex;
+  background: var(--gray-100);
+  border-radius: 10px;
+  padding: 4px;
+  margin-top: 16px;
+  margin-bottom: 16px;
+  gap: 4px;
+}
+
+.mode-tab {
+  flex: 1;
+  padding: 10px 14px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--gray-500);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.mode-tab:hover {
+  color: var(--gray-800);
+}
+
+.mode-tab.active {
+  background: white;
+  color: var(--primary);
+  box-shadow: var(--shadow);
+}
+
+/* Whiteboard Canvas */
+.canvas-wrapper {
+  position: relative;
+  width: 100%;
+  border-radius: var(--radius);
+  border: 2px solid var(--gray-300);
+  background: #ffffff;
+  overflow: hidden;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.03);
+  transition: border-color 0.2s;
+  cursor: crosshair;
+}
+
+.canvas-wrapper:focus-within,
+.canvas-wrapper.drawing {
+  border-color: var(--primary);
+}
+
+#whiteboardCanvas {
+  display: block;
+  width: 100%;
+  height: 280px;
+  touch-action: none;
+}
+
+.canvas-placeholder {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  color: #9ca3af;
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: opacity 0.2s;
+  user-select: none;
+}
+
+.canvas-placeholder.hidden {
+  opacity: 0;
+}
+
+/* Whiteboard Toolbar */
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  background: var(--gray-100);
+  padding: 8px 12px;
+  border-radius: 10px;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-label {
+  font-size: 0.8rem;
+  color: var(--gray-700);
+  font-weight: 500;
+}
+
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-300);
+  background: white;
+  color: var(--gray-700);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tool-btn:hover {
+  background: var(--gray-50);
+}
+
+.tool-btn.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+.tool-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-300);
+  background: white;
+  color: var(--gray-700);
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tool-btn-secondary:hover {
+  background: var(--gray-50);
+  border-color: var(--gray-400);
+}
+
+.tool-btn-secondary.danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: #fef2f2;
+}
+
+.width-selector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: white;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-300);
+}
+
+.width-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.width-btn:hover {
+  background: var(--gray-100);
+}
+
+.width-btn.active {
+  background: var(--gray-200);
+}
+
+.width-btn .dot {
+  background: var(--gray-800);
+  border-radius: 50%;
+  display: block;
+}
+
+.dot-sm { width: 3px; height: 3px; }
+.dot-md { width: 6px; height: 6px; }
+.dot-lg { width: 9px; height: 9px; }
+
+.color-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.color-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid white;
+  outline: 1px solid var(--gray-300);
+  cursor: pointer;
+  transition: transform 0.15s, outline-color 0.15s;
+}
+
+.color-btn:hover {
+  transform: scale(1.1);
+}
+
+.color-btn.active {
+  outline: 2px solid var(--primary);
+  transform: scale(1.15);
+}
+
+@media (max-width: 480px) {
+  .canvas-toolbar {
+    justify-content: center;
+  }
+  .toolbar-actions {
+    width: 100%;
+    justify-content: center;
+    margin-top: 4px;
+  }
+}
+
 .custom-text-toggle {
   color: var(--primary);
   cursor: pointer;
