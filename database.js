@@ -367,13 +367,46 @@ function getOldRejectedImages(olderThanSeconds = 60) {
     SELECT id, filename, status, reviewed_at
     FROM images
     WHERE status = 'rejected'
-      AND reviewed_at IS NOT NULL
-      AND reviewed_at <= datetime('now', '-' || ? || ' seconds')
+      AND (reviewed_at IS NULL OR reviewed_at <= datetime('now', '-' || ? || ' seconds'))
   `, [olderThanSeconds]);
+}
+
+function getAllRejectedImages() {
+  return all(`SELECT id, filename, status FROM images WHERE status = 'rejected'`);
 }
 
 function deleteImage(id) {
   return run(`DELETE FROM images WHERE id = ?`, [id]);
+}
+
+function deleteImagesBatch(ids) {
+  if (!ids || !ids.length) return 0;
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const placeholders = chunk.map(() => '?').join(',');
+    db.run(`DELETE FROM images WHERE id IN (${placeholders})`, chunk);
+  }
+  saveDatabase();
+  return ids.length;
+}
+
+function updateImagesStatusBatch(ids, status, rejectionReason) {
+  if (!ids || !ids.length) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  const images = all(`SELECT id, filename, status FROM images WHERE id IN (${placeholders})`, ids);
+  if (!images.length) return [];
+
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const chunkPlaceholders = chunk.map(() => '?').join(',');
+    db.run(`
+      UPDATE images
+      SET status = ?, rejection_reason = ?, reviewed_at = datetime('now')
+      WHERE id IN (${chunkPlaceholders})
+    `, [status, rejectionReason || null, ...chunk]);
+  }
+  saveDatabase();
+  return images;
 }
 
 module.exports = {
@@ -387,7 +420,10 @@ module.exports = {
   findByFileHash,
   getPendingCount,
   getOldRejectedImages,
+  getAllRejectedImages,
   deleteImage,
+  deleteImagesBatch,
+  updateImagesStatusBatch,
   getRandomPrompt,
   getAllPrompts,
   createPrompt,

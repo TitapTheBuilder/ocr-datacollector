@@ -27,6 +27,21 @@
   const allPagination = document.getElementById('allPagination');
   const filterStatus = document.getElementById('filterStatus');
 
+  // Bulk actions elements
+  const selectAllPending = document.getElementById('selectAllPending');
+  const selectedCountPending = document.getElementById('selectedCountPending');
+  const btnBulkApprovePending = document.getElementById('btnBulkApprovePending');
+  const btnBulkRejectPending = document.getElementById('btnBulkRejectPending');
+
+  const selectAllAll = document.getElementById('selectAllAll');
+  const selectedCountAll = document.getElementById('selectedCountAll');
+  const btnBulkApproveAll = document.getElementById('btnBulkApproveAll');
+  const btnBulkRejectAll = document.getElementById('btnBulkRejectAll');
+
+  const selectedPending = new Set();
+  const selectedAll = new Set();
+  const currentImagesMap = { pending: [], all: [] };
+
   // Prompts
   const promptsList = document.getElementById('promptsList');
   const promptsEmpty = document.getElementById('promptsEmpty');
@@ -160,9 +175,11 @@
       try {
         const res = await fetch('/api/admin/purge-rejected', { method: 'POST' });
         const data = await res.json();
-        alert(`پاک‌سازی انجام شد. ${data.purgedCount} تصویر رد شده از روی دیسک حذف شدند.`);
+        alert(`پاک‌سازی فوری انجام شد. ${data.purgedCount || 0} تصویر رد شده از روی دیسک و دیتابیس حذف شدند.`);
         loadStats();
+        loadPending();
         if (typeof loadAll === 'function') loadAll();
+        loadStorageStats();
       } catch (err) {
         alert('خطا در پاک‌سازی تصاویر: ' + err.message);
       } finally {
@@ -191,15 +208,19 @@
   // --- Image loading ---
   async function loadPending() {
     const data = await fetchImages('pending', currentPage.pending);
-    renderImageGrid(pendingGrid, pendingEmpty, data.images);
+    currentImagesMap.pending = data.images || [];
+    renderImageGrid(pendingGrid, pendingEmpty, currentImagesMap.pending, 'pending');
     renderPagination(pendingPagination, data, 'pending');
+    updateBulkBar('pending');
   }
 
   async function loadAll() {
     const status = filterStatus.value;
     const data = await fetchImages(status, currentPage.all);
-    renderImageGrid(allGrid, allEmpty, data.images);
+    currentImagesMap.all = data.images || [];
+    renderImageGrid(allGrid, allEmpty, currentImagesMap.all, 'all');
     renderPagination(allPagination, data, 'all');
+    updateBulkBar('all');
   }
 
   async function fetchImages(status, page) {
@@ -209,19 +230,25 @@
     return res.json();
   }
 
-  function renderImageGrid(grid, empty, images) {
+  function renderImageGrid(grid, empty, images, tab = 'pending') {
     if (!images || images.length === 0) {
       grid.innerHTML = '';
       empty.style.display = 'block';
       return;
     }
     empty.style.display = 'none';
+    const selectedSet = tab === 'pending' ? selectedPending : selectedAll;
+
     grid.innerHTML = images.map(img => {
       const folder = img.status === 'approved' ? 'approved' : 'pending';
       const cId = escapeHtml((img.contributor_id || '').substring(0, 8));
+      const isSelected = selectedSet.has(img.id);
       return `
-      <div class="image-card" data-id="${img.id}">
-        <img src="/uploads/${folder}/${img.filename}" alt="" loading="lazy">
+      <div class="image-card ${isSelected ? 'selected' : ''}" data-id="${img.id}">
+        <div class="card-select-wrap" onclick="event.stopPropagation()">
+          <input type="checkbox" class="card-select" data-id="${img.id}" ${isSelected ? 'checked' : ''}>
+        </div>
+        <img src="/uploads/${folder}/${encodeURIComponent(img.filename)}" alt="" loading="lazy">
         <div class="image-card-info">
           <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
           <div class="meta">
@@ -234,9 +261,120 @@
       `;
     }).join('');
 
+    // Open detail modal on card click
     grid.querySelectorAll('.image-card').forEach(card => {
-      card.addEventListener('click', () => openModal(parseInt(card.dataset.id)));
+      card.addEventListener('click', () => openModal(parseInt(card.dataset.id, 10)));
     });
+
+    // Checkbox toggling
+    grid.querySelectorAll('.card-select').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        e.stopPropagation();
+        const id = parseInt(cb.dataset.id, 10);
+        const card = cb.closest('.image-card');
+        if (cb.checked) {
+          selectedSet.add(id);
+          card.classList.add('selected');
+        } else {
+          selectedSet.delete(id);
+          card.classList.remove('selected');
+        }
+        updateBulkBar(tab);
+      });
+    });
+  }
+
+  // --- Bulk Selection & Operations ---
+  function updateBulkBar(tab) {
+    const selectedSet = tab === 'pending' ? selectedPending : selectedAll;
+    const images = currentImagesMap[tab] || [];
+    const countSpan = tab === 'pending' ? selectedCountPending : selectedCountAll;
+    const selectAllCb = tab === 'pending' ? selectAllPending : selectAllAll;
+    const btnApprove = tab === 'pending' ? btnBulkApprovePending : btnBulkApproveAll;
+    const btnReject = tab === 'pending' ? btnBulkRejectPending : btnBulkRejectAll;
+
+    if (countSpan) {
+      countSpan.textContent = `(${selectedSet.size} مورد انتخاب شده)`;
+    }
+
+    const hasSelection = selectedSet.size > 0;
+    if (btnApprove) btnApprove.disabled = !hasSelection;
+    if (btnReject) btnReject.disabled = !hasSelection;
+
+    if (selectAllCb) {
+      selectAllCb.checked = images.length > 0 && images.every(img => selectedSet.has(img.id));
+      selectAllCb.indeterminate = hasSelection && !selectAllCb.checked;
+    }
+  }
+
+  function setupBulkListeners(tab) {
+    const selectAllCb = tab === 'pending' ? selectAllPending : selectAllAll;
+    const btnApprove = tab === 'pending' ? btnBulkApprovePending : btnBulkApproveAll;
+    const btnReject = tab === 'pending' ? btnBulkRejectPending : btnBulkRejectAll;
+    const selectedSet = tab === 'pending' ? selectedPending : selectedAll;
+
+    if (selectAllCb) {
+      selectAllCb.addEventListener('change', () => {
+        const images = currentImagesMap[tab] || [];
+        const grid = tab === 'pending' ? pendingGrid : allGrid;
+        if (selectAllCb.checked) {
+          images.forEach(img => selectedSet.add(img.id));
+          grid.querySelectorAll('.card-select').forEach(cb => { cb.checked = true; });
+          grid.querySelectorAll('.image-card').forEach(card => { card.classList.add('selected'); });
+        } else {
+          images.forEach(img => selectedSet.delete(img.id));
+          grid.querySelectorAll('.card-select').forEach(cb => { cb.checked = false; });
+          grid.querySelectorAll('.image-card').forEach(card => { card.classList.remove('selected'); });
+        }
+        updateBulkBar(tab);
+      });
+    }
+
+    if (btnApprove) {
+      btnApprove.addEventListener('click', () => executeBulkAction(tab, 'approved'));
+    }
+    if (btnReject) {
+      btnReject.addEventListener('click', () => executeBulkAction(tab, 'rejected'));
+    }
+  }
+
+  setupBulkListeners('pending');
+  setupBulkListeners('all');
+
+  async function executeBulkAction(tab, status) {
+    const selectedSet = tab === 'pending' ? selectedPending : selectedAll;
+    const ids = Array.from(selectedSet);
+    if (ids.length === 0) return;
+
+    const actionText = status === 'approved' ? 'تایید' : 'رد';
+    if (!confirm(`آیا از ${actionText} همزمان ${ids.length} تصویر انتخاب شده اطمینان دارید؟`)) return;
+
+    let reason = null;
+    if (status === 'rejected') {
+      reason = prompt('دلیل رد تصاویر (اختیاری):', '') || null;
+    }
+
+    try {
+      const res = await fetch('/api/admin/images/batch-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, status, rejection_reason: reason }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`${data.updatedCount} تصویر با موفقیت ${actionText} شدند.`);
+        selectedSet.clear();
+        updateBulkBar(tab);
+        loadStats();
+        if (tab === 'pending') loadPending();
+        else loadAll();
+        loadStorageStats();
+      } else {
+        alert('خطا در انجام عملیات گروهی: ' + (data.error || 'ناشناخته'));
+      }
+    } catch (err) {
+      alert('خطا در ارتباط با سرور: ' + err.message);
+    }
   }
 
   function renderPagination(container, data, tab) {
@@ -621,10 +759,13 @@
 
   // --- Helpers ---
   function escapeHtml(s) {
-    if (!s) return '';
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
+    if (s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function formatDate(s) {

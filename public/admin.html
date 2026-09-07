@@ -89,6 +89,26 @@
 
     <!-- Pending Tab -->
     <div id="tabPending" class="tab-content active">
+      <!-- Bulk actions bar for pending -->
+      <div id="bulkBarPending" class="bulk-actions-bar" style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:var(--radius); padding:10px 16px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:600; font-size:0.9rem; user-select:none;">
+            <input type="checkbox" id="selectAllPending" style="width:16px; height:16px; cursor:pointer;">
+            انتخاب همه این صفحه
+          </label>
+          <span id="selectedCountPending" style="color:var(--gray-600); font-size:0.85rem; font-weight:600;">(۰ مورد انتخاب شده)</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="btnBulkApprovePending" class="btn btn-success btn-sm" disabled>
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+            تایید دسته‌جمعی
+          </button>
+          <button type="button" id="btnBulkRejectPending" class="btn btn-danger btn-sm" disabled>
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            رد دسته‌جمعی
+          </button>
+        </div>
+      </div>
       <div id="pendingGrid" class="image-grid"></div>
       <div id="pendingEmpty" class="empty-state" style="display:none;">
         <p>تصویری در انتظار بررسی نیست</p>
@@ -99,12 +119,21 @@
     <!-- All Images Tab -->
     <div id="tabAll" class="tab-content">
       <div style="margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-        <select id="filterStatus" class="form-input" style="width:auto; display:inline-block;">
-          <option value="">همه وضعیت‌ها</option>
-          <option value="pending">در انتظار</option>
-          <option value="approved">تایید شده</option>
-          <option value="rejected">رد شده</option>
-        </select>
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <select id="filterStatus" class="form-input" style="width:auto; display:inline-block;">
+            <option value="">همه وضعیت‌ها</option>
+            <option value="pending">در انتظار</option>
+            <option value="approved">تایید شده</option>
+            <option value="rejected">رد شده</option>
+          </select>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85rem; font-weight:600; user-select:none;">
+            <input type="checkbox" id="selectAllAll" style="width:16px; height:16px; cursor:pointer;">
+            انتخاب همه این صفحه
+          </label>
+          <span id="selectedCountAll" style="color:var(--gray-600); font-size:0.85rem; font-weight:600;">(۰ مورد انتخاب شده)</span>
+          <button type="button" id="btnBulkApproveAll" class="btn btn-success btn-sm" disabled>تایید گروهی</button>
+          <button type="button" id="btnBulkRejectAll" class="btn btn-danger btn-sm" disabled>رد گروهی</button>
+        </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <a href="/api/admin/export-zip" class="btn btn-success btn-sm" target="_blank">
             <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>

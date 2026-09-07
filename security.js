@@ -3,13 +3,26 @@ const path = require('path');
 const crypto = require('crypto');
 const config = require('./config');
 
-// --- Helper: Extract Client IP ---
-function getClientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (forwarded) {
-    return forwarded.split(',')[0].trim();
+// --- Helper: Extract & Sanitize Client IP ---
+function sanitizeIp(ip) {
+  if (!ip || typeof ip !== 'string') return '127.0.0.1';
+  let clean = ip.trim();
+  if (clean.startsWith('::ffff:')) {
+    clean = clean.substring(7);
   }
-  return req.socket?.remoteAddress || req.ip || '127.0.0.1';
+  if (clean === '::1') return '127.0.0.1';
+  return clean;
+}
+
+function getClientIp(req) {
+  // Only trust X-Forwarded-For if TRUST_PROXY is explicitly configured to 'true'
+  const trustProxy = process.env.TRUST_PROXY === 'true';
+  if (trustProxy && req.headers['x-forwarded-for']) {
+    const forwarded = req.headers['x-forwarded-for'].split(',')[0].trim();
+    if (forwarded) return sanitizeIp(forwarded);
+  }
+  const rawIp = req.socket?.remoteAddress || req.ip || '127.0.0.1';
+  return sanitizeIp(rawIp);
 }
 
 // --- Memory Rate Limiter ---
@@ -97,11 +110,18 @@ const uploadMinuteLimiter = new MemoryRateLimiter({
   message: 'تعداد آپلودهای ارسالی در دقیقه بیش از حد مجاز است (حداکثر ۵ در دقیقه). لطفاً کمی صبر کنید.',
 });
 
-// Admin login rate limiter (max 5 failed attempts in 15 mins)
+// Admin login rate limiter (max 5 failed attempts in 15 mins per IP)
 const loginAttemptLimiter = new MemoryRateLimiter({
   windowMs: 15 * 60 * 1000,
   max: 5,
   message: 'به دلیل تلاش‌های ناموفق مکرر، ورود موقتاً مسدود شد. لطفاً ۱۵ دقیقه دیگر تلاش کنید.',
+});
+
+// System-wide login failure limiter (max 25 failed attempts in 5 mins across all IPs to stop distributed brute-force)
+const globalLoginLimiter = new MemoryRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 25,
+  message: 'تعداد تلاش‌های ناموفق ورود در کل سامانه بیش از حد مجاز است. لطفاً ۵ دقیقه دیگر تلاش کنید.',
 });
 
 // --- Storage Quota Calculation ---
@@ -208,15 +228,17 @@ function computeFileHash(filePath) {
   });
 }
 
-// --- Auto-Purge Worker: Delete Rejected Images After 1 Minute ---
-function purgeRejectedImages(db) {
+// --- Auto-Purge Worker & Manual Purge: Delete Rejected Images ---
+function purgeRejectedImages(db, forceAll = false) {
   try {
     const retentionSeconds = Math.floor((config.REJECTED_RETENTION_MS || 60000) / 1000);
-    const rejectedImages = db.getOldRejectedImages(retentionSeconds);
+    const rejectedImages = forceAll
+      ? db.getAllRejectedImages()
+      : db.getOldRejectedImages(retentionSeconds);
 
     if (!rejectedImages || rejectedImages.length === 0) return 0;
 
-    let purgedCount = 0;
+    const idsToDelete = [];
     for (const img of rejectedImages) {
       // 1. Delete physical file from disk
       const pathsToCheck = [
@@ -234,18 +256,18 @@ function purgeRejectedImages(db) {
         }
       }
 
-      // 2. Delete row from database
-      db.deleteImage(img.id);
-      purgedCount++;
+      idsToDelete.push(img.id);
     }
 
-    if (purgedCount > 0) {
+    // 2. Batch delete rows from database
+    if (idsToDelete.length > 0) {
+      db.deleteImagesBatch(idsToDelete);
       // Invalidate storage cache
       lastStorageCheck = 0;
-      console.log(`[Security Cleanup] Purged ${purgedCount} rejected images older than ${retentionSeconds}s (storage reclaimed).`);
+      console.log(`[Security Cleanup] Purged ${idsToDelete.length} rejected images (${forceAll ? 'manual instant' : 'auto older than ' + retentionSeconds + 's'}).`);
     }
 
-    return purgedCount;
+    return idsToDelete.length;
   } catch (err) {
     console.error('[Security Cleanup] Error purging rejected images:', err.message);
     return 0;
@@ -255,17 +277,20 @@ function purgeRejectedImages(db) {
 // Start periodic rejected image cleanup (runs every 30 seconds)
 function startAutoPurgeWorker(db) {
   const timer = setInterval(() => {
-    purgeRejectedImages(db);
+    purgeRejectedImages(db, false);
   }, 30 * 1000);
   timer.unref();
   return timer;
 }
 
 module.exports = {
+  sanitizeIp,
   getClientIp,
+  MemoryRateLimiter,
   globalApiLimiter,
   uploadMinuteLimiter,
   loginAttemptLimiter,
+  globalLoginLimiter,
   storageQuotaGuard,
   getStorageUsageBytes,
   validateMagicBytes,
