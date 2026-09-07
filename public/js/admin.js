@@ -109,6 +109,11 @@
     btnLogout.style.display = 'none';
   });
 
+  // Storage elements
+  const storageProgressBar = document.getElementById('storageProgressBar');
+  const storageStatsText = document.getElementById('storageStatsText');
+  const btnPurgeRejected = document.getElementById('btnPurgeRejected');
+
   // --- Stats ---
   async function loadStats() {
     try {
@@ -120,9 +125,50 @@
       statRejected.textContent = s.rejected;
       statSynced.textContent = s.synced;
       statContributors.textContent = s.contributors;
+
+      loadStorageStats();
     } catch {
       // silent
     }
+  }
+
+  async function loadStorageStats() {
+    try {
+      const res = await fetch('/api/admin/storage-stats');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (storageProgressBar && storageStatsText) {
+        storageProgressBar.style.width = Math.min(100, data.percent) + '%';
+        if (data.percent > 85) {
+          storageProgressBar.style.background = 'var(--danger)';
+        } else if (data.percent > 65) {
+          storageProgressBar.style.background = '#f59e0b';
+        } else {
+          storageProgressBar.style.background = 'var(--primary)';
+        }
+        storageStatsText.textContent = `${data.usedMB} MB از ${data.maxMB} MB (${data.percent}%)`;
+      }
+    } catch {
+      // silent
+    }
+  }
+
+  if (btnPurgeRejected) {
+    btnPurgeRejected.addEventListener('click', async () => {
+      if (!confirm('آیا از حذف کامل و فوری تمام فایل‌های تصاویر رد شده از روی دیسک اطمینان دارید؟')) return;
+      btnPurgeRejected.disabled = true;
+      try {
+        const res = await fetch('/api/admin/purge-rejected', { method: 'POST' });
+        const data = await res.json();
+        alert(`پاک‌سازی انجام شد. ${data.purgedCount} تصویر رد شده از روی دیسک حذف شدند.`);
+        loadStats();
+        if (typeof loadAll === 'function') loadAll();
+      } catch (err) {
+        alert('خطا در پاک‌سازی تصاویر: ' + err.message);
+      } finally {
+        btnPurgeRejected.disabled = false;
+      }
+    });
   }
 
   // --- Tabs ---

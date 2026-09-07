@@ -8,11 +8,22 @@ const archiver = require('archiver');
 const config = require('./config');
 const db = require('./database');
 const drive = require('./google-drive');
+const security = require('./security');
 
 // --- Setup ---
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.set('trust proxy', true);
+
+// Security Headers
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  next();
+});
+
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(express.static('public'));
 app.use('/uploads', express.static(config.UPLOAD_DIR));
 
@@ -21,10 +32,13 @@ for (const dir of [config.PENDING_DIR, config.APPROVED_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+// Global API rate limiting
+app.use('/api/', security.globalApiLimiter.middleware());
+
 // Request logging
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} - IP: ${security.getClientIp(req)}`);
   }
   next();
 });
@@ -175,70 +189,126 @@ app.get('/api/prompts/next', (req, res) => {
   }
 });
 
-// Upload image
-app.post('/api/images', upload.single('image'), (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'تصویری ارسال نشد.' });
-    }
+// Pre-upload security checks executed BEFORE Multer touches the disk
+function preUploadSecurityCheck(req, res, next) {
+  const clientIp = security.getClientIp(req);
 
-    const { prompt_id, custom_text, contributor_id } = req.body;
-
-    if (!contributor_id) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ success: false, error: 'contributor_id is required' });
-    }
-
-    if (!prompt_id && !custom_text) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ success: false, error: 'Either prompt_id or custom_text is required' });
-    }
-
-    // Ensure contributor exists in database
-    db.createContributor(contributor_id, req.headers['user-agent']);
-
-    // Rate limit check
-    const uploadCount = db.countContributorUploadsLastHour(contributor_id);
-    if (uploadCount >= config.MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR) {
-      fs.unlinkSync(req.file.path);
-      return res.status(429).json({ success: false, error: 'تعداد آپلودهای شما در ساعت گذشته بیش از حد مجاز است. لطفاً بعداً تلاش کنید.' });
-    }
-
-    // Fix filename if multer created it with unknown_ prefix
-    let filename = req.file.filename;
-    if (filename.startsWith('unknown_') && contributor_id) {
-      const fixedName = filename.replace('unknown_', `${contributor_id.substring(0, 8)}_`);
-      const oldPath = req.file.path;
-      const newPath = path.join(path.dirname(oldPath), fixedName);
-      try {
-        fs.renameSync(oldPath, newPath);
-        filename = fixedName;
-        req.file.filename = fixedName;
-        req.file.path = newPath;
-      } catch (renameErr) {
-        console.warn('[API] Could not rename file with contributor prefix:', renameErr.message);
-      }
-    }
-
-    const result = db.createImage({
-      filename,
-      originalName: req.file.originalname,
-      promptId: prompt_id || null,
-      customText: custom_text || null,
-      contributorId: contributor_id,
-      mimeType: req.file.mimetype,
-      fileSize: req.file.size,
+  // Check IP hourly upload count directly from database
+  const ipHourlyCount = db.countIpUploadsLastHour(clientIp);
+  if (ipHourlyCount >= (config.MAX_UPLOADS_PER_IP_PER_HOUR || 20)) {
+    return res.status(429).json({
+      success: false,
+      error: `سقف آپلود ساعتی برای آدرس شما (${config.MAX_UPLOADS_PER_IP_PER_HOUR || 20} تصویر در ساعت) به پایان رسیده است. لطفاً بعداً تلاش کنید.`,
     });
-
-    res.json({ success: true, image_id: result.lastInsertRowid });
-  } catch (err) {
-    console.error('[API] POST /api/images:', err.message);
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    res.status(500).json({ success: false, error: 'Server error' });
   }
-});
+
+  next();
+}
+
+// Upload image (Protected by pre-multer IP & storage guards, magic-bytes, and SHA-256 deduplication)
+app.post(
+  '/api/images',
+  security.uploadMinuteLimiter.middleware(),
+  security.storageQuotaGuard(db),
+  preUploadSecurityCheck,
+  upload.single('image'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ success: false, error: 'تصویری ارسال نشد.' });
+      }
+
+      const clientIp = security.getClientIp(req);
+      const { prompt_id, custom_text, contributor_id, hp_website } = req.body;
+
+      // 1. Anti-bot honeypot check
+      if (hp_website) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ success: false, error: 'درخواست نامعتبر' });
+      }
+
+      if (!contributor_id) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ success: false, error: 'contributor_id is required' });
+      }
+
+      if (!prompt_id && !custom_text) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ success: false, error: 'Either prompt_id or custom_text is required' });
+      }
+
+      // 2. Validate Binary Magic Bytes (prevent fake file / garbage uploads)
+      const detectedMime = security.validateMagicBytes(req.file.path);
+      if (!detectedMime) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({
+          success: false,
+          error: 'فایل ارسالی تصویر معتبر نیست یا محتوای آن تخریب شده است.',
+        });
+      }
+
+      // 3. Prevent duplicate image spam (SHA-256 Hash check)
+      const fileHash = await security.computeFileHash(req.file.path);
+      const duplicate = db.findByFileHash(fileHash);
+      if (duplicate) {
+        fs.unlinkSync(req.file.path);
+        return res.status(409).json({
+          success: false,
+          error: 'این تصویر قبلاً در سامانه ثبت شده است. لطفاً تصویر جدیدی ارسال کنید.',
+        });
+      }
+
+      // 4. Rate limit check for contributor ID
+      const uploadCount = db.countContributorUploadsLastHour(contributor_id);
+      if (uploadCount >= config.MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR) {
+        fs.unlinkSync(req.file.path);
+        return res.status(429).json({
+          success: false,
+          error: 'تعداد آپلودهای شما در ساعت گذشته بیش از حد مجاز است. لطفاً بعداً تلاش کنید.',
+        });
+      }
+
+      // Ensure contributor exists in database
+      db.createContributor(contributor_id, req.headers['user-agent']);
+
+      // Fix filename if multer created it with unknown_ prefix
+      let filename = req.file.filename;
+      if (filename.startsWith('unknown_') && contributor_id) {
+        const fixedName = filename.replace('unknown_', `${contributor_id.substring(0, 8)}_`);
+        const oldPath = req.file.path;
+        const newPath = path.join(path.dirname(oldPath), fixedName);
+        try {
+          fs.renameSync(oldPath, newPath);
+          filename = fixedName;
+          req.file.filename = fixedName;
+          req.file.path = newPath;
+        } catch (renameErr) {
+          console.warn('[API] Could not rename file with contributor prefix:', renameErr.message);
+        }
+      }
+
+      const result = db.createImage({
+        filename,
+        originalName: req.file.originalname,
+        promptId: prompt_id || null,
+        customText: custom_text || null,
+        contributorId: contributor_id,
+        mimeType: detectedMime,
+        fileSize: req.file.size,
+        ipAddress: clientIp,
+        fileHash: fileHash,
+      });
+
+      res.json({ success: true, image_id: result.lastInsertRowid });
+    } catch (err) {
+      console.error('[API] POST /api/images:', err.message);
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      res.status(500).json({ success: false, error: 'Server error' });
+    }
+  }
+);
 
 // Contributor upload count
 app.get('/api/contributors/:id/count', (req, res) => {
@@ -258,12 +328,23 @@ app.get('/api/contributors/:id/count', (req, res) => {
 // Login
 app.post('/api/admin/login', (req, res) => {
   try {
+    const clientIp = security.getClientIp(req);
+    if (security.loginAttemptLimiter.isBlocked(clientIp)) {
+      return res.status(429).json({
+        success: false,
+        error: 'به دلیل تلاش‌های ناموفق مکرر، ورود موقتاً مسدود شد. لطفاً ۱۵ دقیقه دیگر تلاش کنید.',
+      });
+    }
+
     const { username, password } = req.body;
     if (username === config.ADMIN_USERNAME && verifyPassword(password, config.ADMIN_PASSWORD_HASH)) {
+      security.loginAttemptLimiter.reset(clientIp);
       const token = createSession();
       res.setHeader('Set-Cookie', `admin_session=${token}; HttpOnly; Path=/; Max-Age=${config.SESSION_EXPIRY_MS / 1000}`);
       return res.json({ success: true });
     }
+
+    security.loginAttemptLimiter.recordFailure(clientIp);
     res.status(401).json({ success: false, error: 'نام کاربری یا رمز عبور اشتباه است.' });
   } catch (err) {
     console.error('[API] POST /api/admin/login:', err.message);
@@ -661,6 +742,37 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
   }
 });
 
+// Storage usage stats
+app.get('/api/admin/storage-stats', requireAdmin, (req, res) => {
+  try {
+    const usedBytes = security.getStorageUsageBytes();
+    const maxBytes = (config.MAX_STORAGE_MB || 1000) * 1024 * 1024;
+    const pendingCount = db.getPendingCount();
+    res.json({
+      usedBytes,
+      usedMB: Math.round(usedBytes / (1024 * 1024) * 10) / 10,
+      maxMB: config.MAX_STORAGE_MB || 1000,
+      percent: Math.min(100, Math.round((usedBytes / maxBytes) * 1000) / 10),
+      pendingCount,
+      maxPending: config.MAX_PENDING_IMAGES || 2000,
+    });
+  } catch (err) {
+    console.error('[API] GET /api/admin/storage-stats:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// Manual purge of rejected images
+app.post('/api/admin/purge-rejected', requireAdmin, (req, res) => {
+  try {
+    const purgedCount = security.purgeRejectedImages(db);
+    res.json({ success: true, purgedCount });
+  } catch (err) {
+    console.error('[API] POST /api/admin/purge-rejected:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
@@ -685,6 +797,10 @@ app.use((err, req, res, next) => {
 async function start() {
   await db.initDatabase();
   const driveReady = drive.initialize();
+
+  // Start 1-minute auto-purge worker for rejected images
+  security.startAutoPurgeWorker(db);
+  console.log(`[Security] Auto-purge worker started (rejected images deleted after ${Math.floor(config.REJECTED_RETENTION_MS / 1000)}s)`);
 
   app.listen(config.PORT, config.HOST, () => {
     console.log(`\n========================================`);

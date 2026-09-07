@@ -122,6 +122,8 @@
         <div class="paste-hint">یا تصویر را در صفحه کپی کرده و با فشردن کلیدهای Ctrl+V الصاق کنید</div>
         <input type="file" id="cameraInput" class="file-input" accept="image/*" capture="environment">
         <input type="file" id="fileInput" class="file-input" accept="image/*">
+        <!-- Anti-bot honeypot field (hidden from real users) -->
+        <input type="text" id="hpWebsite" name="hp_website" style="display:none !important;" tabindex="-1" autocomplete="off" aria-hidden="true">
 
         <div id="previewContainer" class="preview-container">
           <div id="previewLabelBox" class="preview-label-box">

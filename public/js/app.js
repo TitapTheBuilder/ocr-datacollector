@@ -117,7 +117,60 @@
   }
 
   // --- Handle file selection ---
-  function handleFile(file) {
+  // --- Client-Side Image Compression ---
+  // Compresses phone camera photos (e.g. 5-15MB) to ~200KB before uploading to save storage & bandwidth
+  function compressImage(file, maxDimension = 1600, quality = 0.85) {
+    return new Promise((resolve) => {
+      if (file.size <= 150 * 1024) {
+        return resolve(file);
+      }
+
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob((blob) => {
+          if (blob && blob.size < file.size) {
+            const compressedFile = new File([blob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", {
+              type: 'image/jpeg',
+              lastModified: Date.now(),
+            });
+            resolve(compressedFile);
+          } else {
+            resolve(file);
+          }
+        }, 'image/jpeg', quality);
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(file);
+      };
+      img.src = url;
+    });
+  }
+
+  async function handleFile(file) {
     if (!file) return;
 
     const allowed = ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'];
@@ -125,8 +178,12 @@
       showStatus('فقط فایل‌های تصویری JPEG، PNG و WebP مجاز هستند.', 'error');
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      showStatus('حجم فایل نباید بیشتر از ۱۰ مگابایت باشد.', 'error');
+
+    showStatus('در حال آماده‌سازی و بهینه‌سازی تصویر...', 'info');
+    const processedFile = await compressImage(file);
+
+    if (processedFile.size > 2 * 1024 * 1024) {
+      showStatus('حجم فایل بیش از ۲ مگابایت است. لطفاً تصویر کوچک‌تری انتخاب کنید.', 'error');
       return;
     }
 
@@ -134,11 +191,12 @@
       URL.revokeObjectURL(currentObjectUrl);
     }
 
-    selectedFile = file;
-    currentObjectUrl = URL.createObjectURL(file);
+    selectedFile = processedFile;
+    currentObjectUrl = URL.createObjectURL(processedFile);
     previewImg.src = currentObjectUrl;
     updatePreviewLabel();
     previewContainer.classList.add('active');
+    statusMsg.className = 'status-msg';
   }
 
   cameraInput.addEventListener('change', () => handleFile(cameraInput.files[0]));
@@ -225,6 +283,8 @@
       const formData = new FormData();
       // CRITICAL: Append metadata BEFORE file so Multer parses contributor_id before file streaming
       formData.append('contributor_id', contributorId);
+      const hpVal = document.getElementById('hpWebsite')?.value || '';
+      if (hpVal) formData.append('hp_website', hpVal);
       if (promptId) formData.append('prompt_id', promptId);
       if (customText) formData.append('custom_text', customText);
       formData.append('image', selectedFile);
@@ -525,6 +585,8 @@
       try {
         const formData = new FormData();
         formData.append('contributor_id', contributorId);
+        const hpVal = document.getElementById('hpWebsite')?.value || '';
+        if (hpVal) formData.append('hp_website', hpVal);
         if (promptId) formData.append('prompt_id', promptId);
         if (customText) formData.append('custom_text', customText);
         formData.append('image', blob, `whiteboard_${Date.now()}.jpg`);

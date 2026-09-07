@@ -73,6 +73,12 @@ async function initDatabase() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_contributor ON images(contributor_id)`);
 
+  // Migrate columns for security: ip_address and file_hash
+  try { db.run(`ALTER TABLE images ADD COLUMN ip_address TEXT`); } catch (_) {}
+  try { db.run(`ALTER TABLE images ADD COLUMN file_hash TEXT`); } catch (_) {}
+  try { db.run(`CREATE INDEX IF NOT EXISTS idx_images_ip ON images(ip_address)`); } catch (_) {}
+  try { db.run(`CREATE INDEX IF NOT EXISTS idx_images_file_hash ON images(file_hash)`); } catch (_) {}
+
   db.run(`
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
@@ -229,9 +235,19 @@ function createPromptBatch(filename, rowCount) {
 
 function createImage(data) {
   return run(`
-    INSERT INTO images (filename, original_name, prompt_id, custom_text, contributor_id, mime_type, file_size)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `, [data.filename, data.originalName, data.promptId || null, data.customText || null, data.contributorId, data.mimeType, data.fileSize]);
+    INSERT INTO images (filename, original_name, prompt_id, custom_text, contributor_id, mime_type, file_size, ip_address, file_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    data.filename,
+    data.originalName,
+    data.promptId || null,
+    data.customText || null,
+    data.contributorId,
+    data.mimeType,
+    data.fileSize,
+    data.ipAddress || null,
+    data.fileHash || null
+  ]);
 }
 
 function getImages({ status, page, limit }) {
@@ -322,12 +338,56 @@ function setSetting(key, value) {
   return run(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [key, value]);
 }
 
+// --- Security & Quota Queries ---
+
+function countIpUploadsLastHour(ip) {
+  if (!ip) return 0;
+  const row = get(`SELECT COUNT(*) as count FROM images WHERE ip_address = ? AND created_at > datetime('now', '-1 hour')`, [ip]);
+  return row ? row.count : 0;
+}
+
+function countIpUploadsLastMinute(ip) {
+  if (!ip) return 0;
+  const row = get(`SELECT COUNT(*) as count FROM images WHERE ip_address = ? AND created_at > datetime('now', '-1 minute')`, [ip]);
+  return row ? row.count : 0;
+}
+
+function findByFileHash(hash) {
+  if (!hash) return null;
+  return get(`SELECT id, filename, status FROM images WHERE file_hash = ? AND status != 'rejected' LIMIT 1`, [hash]);
+}
+
+function getPendingCount() {
+  const row = get(`SELECT COUNT(*) as count FROM images WHERE status = 'pending'`);
+  return row ? row.count : 0;
+}
+
+function getOldRejectedImages(olderThanSeconds = 60) {
+  return all(`
+    SELECT id, filename, status, reviewed_at
+    FROM images
+    WHERE status = 'rejected'
+      AND reviewed_at IS NOT NULL
+      AND reviewed_at <= datetime('now', '-' || ? || ' seconds')
+  `, [olderThanSeconds]);
+}
+
+function deleteImage(id) {
+  return run(`DELETE FROM images WHERE id = ?`, [id]);
+}
+
 module.exports = {
   db: { get: () => db },
   initDatabase,
   createContributor,
   getContributor,
   countContributorUploadsLastHour,
+  countIpUploadsLastHour,
+  countIpUploadsLastMinute,
+  findByFileHash,
+  getPendingCount,
+  getOldRejectedImages,
+  deleteImage,
   getRandomPrompt,
   getAllPrompts,
   createPrompt,

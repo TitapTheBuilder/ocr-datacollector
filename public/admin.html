@@ -62,6 +62,23 @@
       </div>
     </div>
 
+    <!-- Storage Quota & Auto-Purge Status Bar -->
+    <div style="background:white; border-radius:var(--radius); padding:14px 20px; margin-bottom:20px; box-shadow:var(--shadow); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+      <div style="display:flex; align-items:center; gap:12px; flex:1; min-width:280px;">
+        <span style="font-weight:600; font-size:0.9rem;">💾 وضعیت حافظه سرور:</span>
+        <div style="flex:1; max-width:220px; background:var(--gray-200); height:12px; border-radius:6px; overflow:hidden;">
+          <div id="storageProgressBar" style="width:0%; height:100%; background:var(--primary); transition:width 0.3s;"></div>
+        </div>
+        <span id="storageStatsText" style="font-size:0.85rem; color:var(--gray-700);">در حال بررسی...</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <span style="font-size:0.8rem; color:var(--gray-500);">⏱️ پاک‌سازی خودکار تصاویر رد شده: پس از ۱ دقیقه</span>
+        <button type="button" id="btnPurgeRejected" class="btn btn-outline btn-sm" style="color:var(--danger); border-color:var(--gray-300);" title="حذف دستی فوری فایل‌های رد شده از روی دیسک">
+          🧹 پاک‌سازی فوری رد شده‌ها
+        </button>
+      </div>
+    </div>
+
     <!-- Tabs -->
     <div class="tabs">
       <button class="tab active" data-tab="pending">در انتظار بررسی</button>
