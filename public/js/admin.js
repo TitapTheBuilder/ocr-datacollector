@@ -218,16 +218,17 @@
     empty.style.display = 'none';
     grid.innerHTML = images.map(img => {
       const folder = img.status === 'approved' ? 'approved' : 'pending';
+      const cId = escapeHtml((img.contributor_id || '').substring(0, 8));
       return `
       <div class="image-card" data-id="${img.id}">
         <img src="/uploads/${folder}/${img.filename}" alt="" loading="lazy">
         <div class="image-card-info">
           <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
           <div class="meta">
-            <div>مشارکت‌کننده: ${img.contributor_id.substring(0, 8)}...</div>
+            <div>مشارکت‌کننده: ${cId}...</div>
             <div>${formatDate(img.created_at)}</div>
           </div>
-          <span class="status-badge ${img.status}">${statusLabel(img.status)}</span>
+          <span class="status-badge ${escapeHtml(img.status)}">${statusLabel(img.status)}</span>
         </div>
       </div>
       `;
@@ -269,12 +270,12 @@
 
       modalInfo.innerHTML = `
         <p><strong>متن:</strong> ${escapeHtml(img.prompt_text || img.custom_text || '—')}</p>
-        <p><strong>دسته:</strong> ${img.prompt_category || '—'}</p>
-        <p><strong>مشارکت‌کننده:</strong> ${img.contributor_id.substring(0, 12)}...</p>
-        <p><strong>تاریخ:</strong> ${formatDate(img.created_at)}</p>
-        <p><strong>وضعیت:</strong> <span class="status-badge ${img.status}">${statusLabel(img.status)}</span></p>
+        <p><strong>دسته:</strong> ${escapeHtml(img.prompt_category || '—')}</p>
+        <p><strong>مشارکت‌کننده:</strong> ${escapeHtml(img.contributor_id || '')}</p>
+        <p><strong>تاریخ:</strong> ${escapeHtml(formatDate(img.created_at))}</p>
+        <p><strong>وضعیت:</strong> <span class="status-badge ${escapeHtml(img.status)}">${statusLabel(img.status)}</span></p>
         ${img.rejection_reason ? `<p><strong>دلیل رد:</strong> ${escapeHtml(img.rejection_reason)}</p>` : ''}
-        ${img.drive_file_id ? `<p><strong>Drive ID:</strong> ${img.drive_file_id}</p>` : ''}
+        ${img.drive_file_id ? `<p><strong>Drive ID:</strong> ${escapeHtml(img.drive_file_id)}</p>` : ''}
       `;
 
       let actionsHtml = '';
@@ -578,7 +579,7 @@
           <div class="image-card-info">
             <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
             <div class="meta">
-              <div>مشارکت‌کننده: ${img.contributor_id.substring(0, 8)}...</div>
+              <div>مشارکت‌کننده: ${escapeHtml((img.contributor_id || '').substring(0, 8))}...</div>
               <div>${formatDate(img.created_at)}</div>
             </div>
             <button class="btn btn-sm btn-primary" style="margin-top:8px;" onclick="event.stopPropagation(); syncSingle(${img.id})">همگام‌سازی</button>

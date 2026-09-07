@@ -85,24 +85,25 @@ const csvUpload = multer({
   },
 });
 
-// --- Admin session management (in-memory) ---
-const sessions = {};
+// --- Admin session management (in-memory Map to avoid prototype pollution) ---
+const sessions = new Map();
 
 function createSession() {
   const token = crypto.randomBytes(32).toString('hex');
-  sessions[token] = { createdAt: Date.now() };
+  sessions.set(token, { createdAt: Date.now() });
   return token;
 }
 
 function destroySession(token) {
-  delete sessions[token];
+  if (token) sessions.delete(token);
 }
 
 function isAdmin(req) {
   const token = req.cookies?.admin_session;
-  if (!token || !sessions[token]) return false;
-  if (Date.now() - sessions[token].createdAt > config.SESSION_EXPIRY_MS) {
-    delete sessions[token];
+  if (!token || typeof token !== 'string' || !sessions.has(token)) return false;
+  const session = sessions.get(token);
+  if (!session || Date.now() - session.createdAt > config.SESSION_EXPIRY_MS) {
+    sessions.delete(token);
     return false;
   }
   return true;
