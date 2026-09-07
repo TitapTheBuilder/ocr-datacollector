@@ -145,9 +145,61 @@
 
     <!-- Sync Tab -->
     <div id="tabSync" class="tab-content">
+      <!-- Drive Config Card -->
+      <div class="prompts-section" style="margin-bottom: 24px;">
+        <div class="prompts-header">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <h3>تنظیمات اتصال Google Drive</h3>
+            <span id="driveStatusBadge" class="status-badge" style="background:var(--gray-200); color:var(--gray-700);">در حال بررسی...</span>
+          </div>
+        </div>
+
+        <p style="color:var(--gray-500); font-size:0.88rem; margin-bottom:16px;">
+          برای همگام‌سازی مستقیم تصاویر با گوگل درایو، فیلدهای زیر را تکمیل و ذخیره کنید (نیازی به آپلود فایل نیست).
+        </p>
+
+        <form id="driveConfigForm">
+          <div class="form-group">
+            <label for="driveFolderId">شناسه پوشه Google Drive (Folder ID)</label>
+            <input type="text" id="driveFolderId" class="form-input" placeholder="مثال: 1A2b3c4D5e6F7g8H9i..." required dir="ltr">
+            <small style="color:var(--gray-500); font-size:0.78rem;">شناسه انتهای لینک پوشه در درایو: drive.google.com/drive/folders/<b>شناسه</b></small>
+          </div>
+
+          <div class="form-group">
+            <label for="driveClientEmail">ایمیل سرویس گوگل (Client Email)</label>
+            <input type="email" id="driveClientEmail" class="form-input" placeholder="مثال: ocr-bot@project-name.iam.gserviceaccount.com" required dir="ltr">
+            <small style="color:var(--gray-500); font-size:0.78rem;">آدرس ایمیل Service Account ایجادشده در کنسول گوگل کلود</small>
+          </div>
+
+          <div class="form-group">
+            <label for="drivePrivateKey">کلید اختصاصی (Private Key)</label>
+            <textarea id="drivePrivateKey" class="form-input" rows="4" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" required dir="ltr" style="font-family:monospace; font-size:0.82rem;"></textarea>
+            <small style="color:var(--gray-500); font-size:0.78rem;">کلید متنی اختصاصی سرویس اکانت</small>
+          </div>
+
+          <div id="driveMsg" class="status-msg" style="margin-top:12px; margin-bottom:12px;"></div>
+
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:16px;">
+            <button type="submit" id="btnSaveDrive" class="btn btn-primary btn-sm">
+              <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              ذخیره تنظیمات
+            </button>
+            <button type="button" id="btnTestDrive" class="btn btn-outline btn-sm">
+              <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              تست اتصال و بررسی دسترسی پوشه
+            </button>
+          </div>
+        </form>
+
+        <div style="background:var(--gray-50); border:1px solid var(--gray-200); border-radius:8px; padding:12px 16px; margin-top:16px; font-size:0.83rem; color:var(--gray-700);">
+          <strong>💡 راهنمای اشتراک‌گذاری:</strong> در گوگل درایو وارد پوشه مورد نظر شوید، روی <b>Share</b> کلیک کنید و ایمیل سرویس بالا را به عنوان <b>Editor</b> به پوشه اضافه نمایید.
+        </div>
+      </div>
+
+      <!-- Sync Images List Card -->
       <div class="prompts-section">
         <div class="prompts-header">
-          <h3>همگام‌سازی با Google Drive</h3>
+          <h3>تصاویر تایید شده آماده همگام‌سازی</h3>
           <div>
             <button id="btnSyncAll" class="btn btn-primary btn-sm">همگام‌سازی همه تصاویر تایید شده</button>
             <a href="/api/admin/export" class="btn btn-outline btn-sm" target="_blank">دانلود CSV خروجی</a>

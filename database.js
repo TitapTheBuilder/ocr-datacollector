@@ -73,6 +73,13 @@ async function initDatabase() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_contributor ON images(contributor_id)`);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `);
+
   saveDatabase();
   console.log('[DB] Initialized successfully.');
   return db;
@@ -304,6 +311,17 @@ function getApprovedForExport() {
   `);
 }
 
+// --- Settings ---
+
+function getSetting(key) {
+  const row = get(`SELECT value FROM settings WHERE key = ?`, [key]);
+  return row ? row.value : null;
+}
+
+function setSetting(key, value) {
+  return run(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [key, value]);
+}
+
 module.exports = {
   db: { get: () => db },
   initDatabase,
@@ -327,4 +345,6 @@ module.exports = {
   getStats,
   getContributorUploadCount,
   getApprovedForExport,
+  getSetting,
+  setSetting,
 };

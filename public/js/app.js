@@ -31,6 +31,7 @@
   const btnNextPrompt = document.getElementById('btnNextPrompt');
   const cameraInput = document.getElementById('cameraInput');
   const fileInput = document.getElementById('fileInput');
+  const btnPaste = document.getElementById('btnPaste');
   const previewContainer = document.getElementById('previewContainer');
   const previewImg = document.getElementById('previewImg');
   const previewLabelText = document.getElementById('previewLabelText');
@@ -142,6 +143,55 @@
 
   cameraInput.addEventListener('change', () => handleFile(cameraInput.files[0]));
   fileInput.addEventListener('change', () => handleFile(fileInput.files[0]));
+
+  // --- Clipboard Paste Support ---
+  function handlePastedFile(file) {
+    if (!file) return;
+    handleFile(file);
+    showStatus('تصویر با موفقیت از کلیپ‌بورد دریافت شد.', 'info');
+  }
+
+  window.addEventListener('paste', (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          handlePastedFile(file);
+          return;
+        }
+      }
+    }
+  });
+
+  if (btnPaste) {
+    btnPaste.addEventListener('click', async () => {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        try {
+          const clipboardItems = await navigator.clipboard.read();
+          for (const item of clipboardItems) {
+            const imageType = item.types.find(type => type.startsWith('image/'));
+            if (imageType) {
+              const blob = await item.getType(imageType);
+              const ext = imageType === 'image/png' ? 'png' : imageType === 'image/webp' ? 'webp' : 'jpg';
+              const file = new File([blob], `clipboard_${Date.now()}.${ext}`, { type: imageType });
+              handlePastedFile(file);
+              return;
+            }
+          }
+          showStatus('تصویری در کلیپ‌بورد یافت نشد. لطفاً ابتدا یک تصویر را کپی کنید یا کلیدهای Ctrl+V را بزنید.', 'error');
+        } catch {
+          showStatus('برای الصاق تصویر، کلیدهای Ctrl+V را در صفحه فشار دهید.', 'info');
+        }
+      } else {
+        showStatus('برای الصاق تصویر، کلیدهای Ctrl+V را در صفحه فشار دهید.', 'info');
+      }
+    });
+  }
 
   // --- Submit Upload ---
   btnSubmit.addEventListener('click', async () => {

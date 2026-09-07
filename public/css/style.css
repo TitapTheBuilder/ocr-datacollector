@@ -143,6 +143,12 @@ body {
   flex-wrap: wrap;
 }
 
+.paste-hint {
+  font-size: 0.82rem;
+  color: var(--gray-500);
+  margin-top: 10px;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;

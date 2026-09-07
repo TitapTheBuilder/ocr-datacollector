@@ -37,6 +37,14 @@
   const syncGrid = document.getElementById('syncGrid');
   const syncEmpty = document.getElementById('syncEmpty');
   const btnSyncAll = document.getElementById('btnSyncAll');
+  const driveConfigForm = document.getElementById('driveConfigForm');
+  const driveStatusBadge = document.getElementById('driveStatusBadge');
+  const driveFolderId = document.getElementById('driveFolderId');
+  const driveClientEmail = document.getElementById('driveClientEmail');
+  const drivePrivateKey = document.getElementById('drivePrivateKey');
+  const btnSaveDrive = document.getElementById('btnSaveDrive');
+  const btnTestDrive = document.getElementById('btnTestDrive');
+  const driveMsg = document.getElementById('driveMsg');
 
   // Modal
   const imageModal = document.getElementById('imageModal');
@@ -398,7 +406,116 @@
   });
 
   // --- Sync ---
+  function showDriveMsg(msg, type) {
+    if (!driveMsg) return;
+    driveMsg.textContent = msg;
+    driveMsg.className = 'status-msg active ' + type;
+  }
+
+  async function loadDriveConfig() {
+    try {
+      const res = await fetch('/api/admin/drive/config');
+      const data = await res.json();
+
+      if (data.configured) {
+        driveStatusBadge.textContent = 'متصل و فعال 🟢';
+        driveStatusBadge.style.background = '#dcfce7';
+        driveStatusBadge.style.color = '#166534';
+      } else {
+        driveStatusBadge.textContent = 'غیرفعال ⚪';
+        driveStatusBadge.style.background = '#fee2e2';
+        driveStatusBadge.style.color = '#991b1b';
+      }
+
+      if (data.folder_id && !driveFolderId.value) {
+        driveFolderId.value = data.folder_id;
+      }
+      if (data.client_email && !driveClientEmail.value) {
+        driveClientEmail.value = data.client_email;
+      }
+      if (data.has_private_key) {
+        drivePrivateKey.placeholder = 'کلید اختصاصی در سیستم ذخیره شده است. (برای تغییر، کلید جدید را وارد کنید)';
+      }
+    } catch (err) {
+      console.error('Error loading drive config:', err);
+    }
+  }
+
+  if (btnTestDrive) {
+    btnTestDrive.addEventListener('click', async () => {
+      const folder_id = driveFolderId.value.trim();
+      const client_email = driveClientEmail.value.trim();
+      const private_key = drivePrivateKey.value.trim();
+
+      if (!folder_id || !client_email) {
+        showDriveMsg('لطفاً شناسه پوشه و ایمیل سرویس را وارد کنید.', 'error');
+        return;
+      }
+
+      btnTestDrive.disabled = true;
+      btnTestDrive.innerHTML = '<span class="spinner"></span> در حال بررسی...';
+
+      try {
+        const res = await fetch('/api/admin/drive/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folder_id, client_email, private_key }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          showDriveMsg(`اتصال موفقیت‌آمیز بود! دسترسی به پوشه «${data.folderName}» در گوگل درایو تایید شد.`, 'success');
+        } else {
+          showDriveMsg(data.error || 'خطا در تست اتصال.', 'error');
+        }
+      } catch (err) {
+        showDriveMsg('خطا در برقراری ارتباط با سرور.', 'error');
+      } finally {
+        btnTestDrive.disabled = false;
+        btnTestDrive.innerHTML = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> تست اتصال و بررسی دسترسی پوشه';
+      }
+    });
+  }
+
+  if (driveConfigForm) {
+    driveConfigForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const folder_id = driveFolderId.value.trim();
+      const client_email = driveClientEmail.value.trim();
+      const private_key = drivePrivateKey.value.trim();
+
+      if (!folder_id || !client_email || !private_key) {
+        showDriveMsg('لطفاً تمام فیلدهای شناسه پوشه، ایمیل و کلید اختصاصی را تکمیل کنید.', 'error');
+        return;
+      }
+
+      btnSaveDrive.disabled = true;
+      btnSaveDrive.innerHTML = '<span class="spinner"></span> در حال ذخیره...';
+
+      try {
+        const res = await fetch('/api/admin/drive/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folder_id, client_email, private_key }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          showDriveMsg(`تنظیمات ذخیره شد! اتصال به پوشه «${data.folderName || ''}» فعال گردید.`, 'success');
+          loadDriveConfig();
+          loadStats();
+        } else {
+          showDriveMsg(data.error || 'خطا در ذخیره تنظیمات.', 'error');
+        }
+      } catch (err) {
+        showDriveMsg('خطا در ذخیره تنظیمات در سرور.', 'error');
+      } finally {
+        btnSaveDrive.disabled = false;
+        btnSaveDrive.innerHTML = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> ذخیره تنظیمات';
+      }
+    });
+  }
+
   async function loadSync() {
+    loadDriveConfig();
     try {
       const res = await fetch('/api/admin/images/unsynced');
       const unsynced = await res.json();

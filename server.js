@@ -405,6 +405,79 @@ app.post('/api/admin/images/sync-all', requireAdmin, async (req, res) => {
   }
 });
 
+// --- Google Drive Config & Test ---
+
+// Get current Drive configuration status
+app.get('/api/admin/drive/config', requireAdmin, (req, res) => {
+  try {
+    res.json(drive.getConfigStatus());
+  } catch (err) {
+    console.error('[API] GET /api/admin/drive/config:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// Test connection with supplied credentials or active credentials
+app.post('/api/admin/drive/test', requireAdmin, async (req, res) => {
+  try {
+    let { client_email, private_key, folder_id } = req.body || {};
+
+    // If body fields not supplied, test currently configured credentials
+    if (!client_email || !private_key || !folder_id) {
+      client_email = client_email || db.getSetting('drive_client_email');
+      private_key = private_key || db.getSetting('drive_private_key');
+      folder_id = folder_id || db.getSetting('drive_folder_id');
+    }
+
+    const result = await drive.testConnection({ client_email, private_key, folder_id });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// Save Drive configuration and initialize
+app.post('/api/admin/drive/config', requireAdmin, async (req, res) => {
+  try {
+    const { client_email, private_key, folder_id } = req.body || {};
+
+    if (!client_email || !client_email.trim()) {
+      return res.status(400).json({ success: false, error: 'ایمیل سرویس گوگل (Client Email) الزامی است.' });
+    }
+    if (!private_key || !private_key.trim()) {
+      return res.status(400).json({ success: false, error: 'کلید اختصاصی (Private Key) الزامی است.' });
+    }
+    if (!folder_id || !folder_id.trim()) {
+      return res.status(400).json({ success: false, error: 'شناسه پوشه Google Drive الزامی است.' });
+    }
+
+    // First test the credentials before saving
+    const testResult = await drive.testConnection({ client_email, private_key, folder_id });
+
+    // Save to database settings
+    db.setSetting('drive_client_email', client_email.trim());
+    db.setSetting('drive_private_key', private_key.trim());
+    db.setSetting('drive_folder_id', folder_id.trim());
+
+    // Re-initialize active drive client
+    drive.initialize({
+      client_email: client_email.trim(),
+      private_key: private_key.trim(),
+      folder_id: folder_id.trim(),
+    });
+
+    res.json({
+      success: true,
+      message: 'تنظیمات با موفقیت ذخیره و Google Drive فعال شد.',
+      folderName: testResult.folderName,
+      status: drive.getConfigStatus(),
+    });
+  } catch (err) {
+    console.error('[API] POST /api/admin/drive/config:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 // --- Prompt Management ---
 
 // List prompts
