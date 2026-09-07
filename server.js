@@ -13,7 +13,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static(config.UPLOAD_DIR));
 
 // Ensure directories exist
 for (const dir of [config.PENDING_DIR, config.APPROVED_DIR]) {
@@ -121,10 +121,16 @@ function generatePasswordHash(password) {
 }
 
 function verifyPassword(password, stored) {
-  if (!stored) return false;
-  const [salt, hash] = stored.split(':');
-  const hashToVerify = crypto.scryptSync(password, salt, 64).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(hashToVerify, 'hex'));
+  if (!stored || typeof stored !== 'string' || !stored.includes(':')) return false;
+  if (!password || typeof password !== 'string') return false;
+  try {
+    const [salt, hash] = stored.split(':');
+    if (!salt || !hash) return false;
+    const hashToVerify = crypto.scryptSync(password, salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(hashToVerify, 'hex'));
+  } catch {
+    return false;
+  }
 }
 
 // Auto-generate default admin password if not set
@@ -187,6 +193,9 @@ app.post('/api/images', upload.single('image'), (req, res) => {
       return res.status(400).json({ success: false, error: 'Either prompt_id or custom_text is required' });
     }
 
+    // Ensure contributor exists in database
+    db.createContributor(contributor_id, req.headers['user-agent']);
+
     // Rate limit check
     const uploadCount = db.countContributorUploadsLastHour(contributor_id);
     if (uploadCount >= config.MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR) {
@@ -194,8 +203,24 @@ app.post('/api/images', upload.single('image'), (req, res) => {
       return res.status(429).json({ success: false, error: 'تعداد آپلودهای شما در ساعت گذشته بیش از حد مجاز است. لطفاً بعداً تلاش کنید.' });
     }
 
+    // Fix filename if multer created it with unknown_ prefix
+    let filename = req.file.filename;
+    if (filename.startsWith('unknown_') && contributor_id) {
+      const fixedName = filename.replace('unknown_', `${contributor_id.substring(0, 8)}_`);
+      const oldPath = req.file.path;
+      const newPath = path.join(path.dirname(oldPath), fixedName);
+      try {
+        fs.renameSync(oldPath, newPath);
+        filename = fixedName;
+        req.file.filename = fixedName;
+        req.file.path = newPath;
+      } catch (renameErr) {
+        console.warn('[API] Could not rename file with contributor prefix:', renameErr.message);
+      }
+    }
+
     const result = db.createImage({
-      filename: req.file.filename,
+      filename,
       originalName: req.file.originalname,
       promptId: prompt_id || null,
       customText: custom_text || null,
@@ -279,6 +304,29 @@ app.get('/api/admin/images', requireAdmin, (req, res) => {
   }
 });
 
+// Get unsynced approved images
+app.get('/api/admin/images/unsynced', requireAdmin, (req, res) => {
+  try {
+    const images = db.getApprovedUnsynced();
+    res.json(images);
+  } catch (err) {
+    console.error('[API] GET /api/admin/images/unsynced:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// Get single image details
+app.get('/api/admin/images/:id', requireAdmin, (req, res) => {
+  try {
+    const image = db.getImage(req.params.id);
+    if (!image) return res.status(404).json({ success: false, error: 'Image not found' });
+    res.json(image);
+  } catch (err) {
+    console.error('[API] GET /api/admin/images/:id:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 // Approve/reject image
 app.patch('/api/admin/images/:id', requireAdmin, (req, res) => {
   try {
@@ -296,6 +344,13 @@ app.patch('/api/admin/images/:id', requireAdmin, (req, res) => {
     if (status === 'approved') {
       const srcPath = path.join(config.PENDING_DIR, image.filename);
       const dstPath = path.join(config.APPROVED_DIR, image.filename);
+      if (fs.existsSync(srcPath)) {
+        fs.renameSync(srcPath, dstPath);
+      }
+    } else if (status === 'rejected') {
+      // If was previously approved, move file back to pending directory
+      const srcPath = path.join(config.APPROVED_DIR, image.filename);
+      const dstPath = path.join(config.PENDING_DIR, image.filename);
       if (fs.existsSync(srcPath)) {
         fs.renameSync(srcPath, dstPath);
       }
@@ -363,6 +418,21 @@ app.get('/api/admin/prompts', requireAdmin, (req, res) => {
   }
 });
 
+// Add single prompt manually
+app.post('/api/admin/prompts', requireAdmin, (req, res) => {
+  try {
+    const { text, category } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ success: false, error: 'متن الزامی است.' });
+    }
+    const result = db.createPrompt(text.trim(), category || 'custom');
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (err) {
+    console.error('[API] POST /api/admin/prompts:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 // Upload CSV of prompts
 app.post('/api/admin/prompts/upload', requireAdmin, csvUpload.single('csv'), (req, res) => {
   try {
@@ -373,22 +443,21 @@ app.post('/api/admin/prompts/upload', requireAdmin, csvUpload.single('csv'), (re
 
     let records;
     try {
-      records = parse(content, { columns: false, skip_empty_lines: true, trim: true });
+      records = parse(content, {
+        columns: false,
+        skip_empty_lines: true,
+        trim: true,
+        bom: true,
+        relax_quotes: true,
+        relax_column_count: true,
+      });
     } catch (e) {
       return res.status(400).json({ success: false, error: 'خطا در خواندن فایل CSV: ' + e.message });
     }
 
     const category = req.body.category || 'csv-batch';
-    let imported = 0;
-
-    for (const row of records) {
-      const text = Array.isArray(row) ? row[0] : row.text;
-      if (text && text.trim()) {
-        db.createPrompt(text.trim(), category);
-        imported++;
-      }
-    }
-
+    const texts = records.map(row => (Array.isArray(row) ? row[0] : row.text)).filter(t => t && String(t).trim());
+    const imported = db.createPromptsBatch(texts, category);
     const batch = db.createPromptBatch(req.file.originalname, imported);
 
     res.json({ success: true, imported, batch_id: batch.lastInsertRowid });
@@ -417,7 +486,7 @@ app.delete('/api/admin/prompts/:id', requireAdmin, (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('[API] DELETE /api/admin/prompts/:id:', err.message);
-    res.status(500).json({ success: false, error: 'Server error' });
+    res.status(err.statusCode || 500).json({ success: false, error: err.message || 'Server error' });
   }
 });
 
@@ -442,6 +511,21 @@ app.get('/api/admin/export', requireAdmin, (req, res) => {
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// --- Global Error Handling Middleware ---
+app.use((err, req, res, next) => {
+  console.error('[Global Error]:', err.message);
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ success: false, error: `حجم فایل بیش از حد مجاز است (حداکثر ${config.MAX_FILE_SIZE_MB} مگابایت).` });
+    }
+    return res.status(400).json({ success: false, error: 'خطا در بارگذاری فایل: ' + err.message });
+  }
+  if (err) {
+    return res.status(err.statusCode || 400).json({ success: false, error: err.message || 'خطایی در سرور رخ داد.' });
+  }
+  next();
 });
 
 // --- Start server ---

@@ -1,34 +1,50 @@
 (() => {
+  // --- Safe UUID Generator for HTTP / Mobile contexts ---
+  function generateUUID() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = (Math.random() * 16) | 0;
+      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
   // --- Contributor ID ---
   let contributorId = localStorage.getItem('contributor_id');
   if (!contributorId) {
-    contributorId = crypto.randomUUID();
+    contributorId = generateUUID();
     localStorage.setItem('contributor_id', contributorId);
-    fetch('/api/contributors', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: contributorId }),
-    });
   }
+
+  // Always register contributor (safe idempotent call)
+  fetch('/api/contributors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: contributorId }),
+  }).catch(() => {});
 
   // --- Elements ---
   const promptText = document.getElementById('promptText');
   const promptCategory = document.getElementById('promptCategory');
+  const btnNextPrompt = document.getElementById('btnNextPrompt');
   const cameraInput = document.getElementById('cameraInput');
   const fileInput = document.getElementById('fileInput');
   const previewContainer = document.getElementById('previewContainer');
   const previewImg = document.getElementById('previewImg');
+  const previewLabelText = document.getElementById('previewLabelText');
   const btnSubmit = document.getElementById('btnSubmit');
   const btnRetake = document.getElementById('btnRetake');
   const statusMsg = document.getElementById('statusMsg');
   const customTextToggle = document.getElementById('customTextToggle');
   const customTextForm = document.getElementById('customTextForm');
   const customTextInput = document.getElementById('customTextInput');
-  const btnCustomSubmit = document.getElementById('btnCustomSubmit');
   const statsBar = document.getElementById('statsBar');
 
   let currentPrompt = null;
   let selectedFile = null;
+  let currentObjectUrl = null;
   let customMode = false;
 
   // --- Status messages ---
@@ -43,12 +59,15 @@
   // --- Load prompt ---
   async function loadPrompt() {
     try {
+      promptText.textContent = 'در حال بارگذاری متن...';
       const res = await fetch(`/api/prompts/next?contributor_id=${contributorId}`);
       if (!res.ok) {
         const data = await res.json();
-        promptText.textContent = data.error || 'متنی موجود نیست';
+        currentPrompt = null;
+        promptText.textContent = data.error || 'متنی برای نمایش موجود نیست.';
         promptCategory.textContent = '';
         promptCategory.style.display = 'none';
+        updatePreviewLabel();
         return;
       }
       currentPrompt = await res.json();
@@ -62,8 +81,10 @@
         custom: 'سفارشی',
       };
       promptCategory.textContent = categoryLabels[currentPrompt.category] || currentPrompt.category;
+      updatePreviewLabel();
     } catch {
       promptText.textContent = 'خطا در بارگذاری متن';
+      updatePreviewLabel();
     }
   }
 
@@ -78,13 +99,29 @@
     }
   }
 
+  // --- Update Preview Text Label ---
+  function updatePreviewLabel() {
+    if (!previewLabelText) return;
+    if (customMode) {
+      const text = customTextInput.value.trim();
+      previewLabelText.textContent = text ? `«${text}» (متن دلخواه)` : '(متن دلخواهی تایپ نشده است)';
+      previewLabelText.style.color = text ? 'var(--gray-900)' : 'var(--danger)';
+    } else if (currentPrompt) {
+      previewLabelText.textContent = `«${currentPrompt.text}»`;
+      previewLabelText.style.color = 'var(--gray-900)';
+    } else {
+      previewLabelText.textContent = '(متنی برای برچسب انتخاب نشده است)';
+      previewLabelText.style.color = 'var(--danger)';
+    }
+  }
+
   // --- Handle file selection ---
   function handleFile(file) {
     if (!file) return;
 
-    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    const allowed = ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'];
     if (!allowed.includes(file.type)) {
-      showStatus('فقط فایل‌های JPEG، PNG و WebP مجاز هستند.', 'error');
+      showStatus('فقط فایل‌های تصویری JPEG، PNG و WebP مجاز هستند.', 'error');
       return;
     }
     if (file.size > 10 * 1024 * 1024) {
@@ -92,114 +129,116 @@
       return;
     }
 
+    if (currentObjectUrl) {
+      URL.revokeObjectURL(currentObjectUrl);
+    }
+
     selectedFile = file;
-    const url = URL.createObjectURL(file);
-    previewImg.src = url;
+    currentObjectUrl = URL.createObjectURL(file);
+    previewImg.src = currentObjectUrl;
+    updatePreviewLabel();
     previewContainer.classList.add('active');
-    customTextForm.classList.remove('active');
-    customMode = false;
   }
 
   cameraInput.addEventListener('change', () => handleFile(cameraInput.files[0]));
   fileInput.addEventListener('change', () => handleFile(fileInput.files[0]));
 
-  // --- Upload ---
-  async function uploadImage(promptId, customText) {
-    if (!selectedFile) return;
+  // --- Submit Upload ---
+  btnSubmit.addEventListener('click', async () => {
+    if (!selectedFile) {
+      showStatus('لطفاً ابتدا یک تصویر انتخاب کنید یا عکس بگیرید.', 'error');
+      return;
+    }
+
+    let promptId = null;
+    let customText = null;
+
+    if (customMode) {
+      customText = customTextInput.value.trim();
+      if (!customText) {
+        showStatus('لطفاً ابتدا متن دست‌نویس خود را تایپ کنید.', 'error');
+        customTextInput.focus();
+        return;
+      }
+    } else {
+      if (!currentPrompt) {
+        showStatus('متن پیشنهادی فعالی وجود ندارد. لطفاً از گزینه «متن دلخواه» استفاده کنید.', 'error');
+        return;
+      }
+      promptId = currentPrompt.id;
+    }
 
     btnSubmit.disabled = true;
-    btnSubmit.innerHTML = '<span class="spinner"></span>';
+    btnSubmit.innerHTML = '<span class="spinner"></span> در حال ارسال...';
 
     try {
       const formData = new FormData();
-      formData.append('image', selectedFile);
+      // CRITICAL: Append metadata BEFORE file so Multer parses contributor_id before file streaming
       formData.append('contributor_id', contributorId);
       if (promptId) formData.append('prompt_id', promptId);
       if (customText) formData.append('custom_text', customText);
+      formData.append('image', selectedFile);
 
       const res = await fetch('/api/images', { method: 'POST', body: formData });
       const data = await res.json();
 
       if (data.success) {
-        showStatus('تصویر شما ثبت شد! متشکریم', 'success');
+        showStatus('تصویر شما با موفقیت ثبت شد! متشکریم.', 'success');
         resetCapture();
-        loadPrompt();
+        if (customMode) {
+          customTextInput.value = '';
+          updatePreviewLabel();
+        } else {
+          loadPrompt();
+        }
         loadStats();
       } else {
         showStatus(data.error || 'خطا در ارسال تصویر', 'error');
       }
     } catch {
-      showStatus('خطا در ارسال. لطفاً دوباره تلاش کنید.', 'error');
+      showStatus('خطا در ارسال تصویر به سرور. لطفاً اتصال اینترنت را بررسی کنید.', 'error');
     } finally {
       btnSubmit.disabled = false;
       btnSubmit.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> تایید و ارسال';
     }
-  }
-
-  // --- Custom text submit ---
-  async function uploadCustomText() {
-    const text = customTextInput.value.trim();
-    if (!text || !selectedFile) return;
-
-    btnCustomSubmit.disabled = true;
-    btnCustomSubmit.innerHTML = '<span class="spinner"></span>';
-
-    try {
-      const formData = new FormData();
-      formData.append('image', selectedFile);
-      formData.append('contributor_id', contributorId);
-      formData.append('custom_text', text);
-
-      const res = await fetch('/api/images', { method: 'POST', body: formData });
-      const data = await res.json();
-
-      if (data.success) {
-        showStatus('تصویر شما ثبت شد! متشکریم', 'success');
-        customTextInput.value = '';
-        resetCapture();
-        loadStats();
-      } else {
-        showStatus(data.error || 'خطا در ارسال تصویر', 'error');
-      }
-    } catch {
-      showStatus('خطا در ارسال. لطفاً دوباره تلاش کنید.', 'error');
-    } finally {
-      btnCustomSubmit.disabled = false;
-      btnCustomSubmit.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> تایید و ارسال';
-    }
-  }
+  });
 
   // --- Reset ---
   function resetCapture() {
     selectedFile = null;
+    if (currentObjectUrl) {
+      URL.revokeObjectURL(currentObjectUrl);
+      currentObjectUrl = null;
+    }
     previewContainer.classList.remove('active');
     previewImg.src = '';
     cameraInput.value = '';
     fileInput.value = '';
   }
 
-  // --- Events ---
-  btnSubmit.addEventListener('click', () => {
-    if (currentPrompt) {
-      uploadImage(currentPrompt.id, null);
-    }
-  });
-
   btnRetake.addEventListener('click', resetCapture);
 
+  // --- Custom Text Toggle ---
   customTextToggle.addEventListener('click', () => {
     customMode = !customMode;
     customTextForm.classList.toggle('active', customMode);
-    if (!customMode) {
+    if (customMode) {
+      customTextToggle.textContent = '↩️ بازگشت به متن پیشنهادی سیستم';
+      customTextInput.focus();
+    } else {
+      customTextToggle.textContent = '✏️ نوشتن متن دلخواه به جای متن پیشنهادی';
       customTextInput.value = '';
     }
+    updatePreviewLabel();
   });
 
-  customTextInput.addEventListener('input', () => {
-    btnCustomSubmit.disabled = !customTextInput.value.trim() || !selectedFile;
-  });
+  customTextInput.addEventListener('input', updatePreviewLabel);
 
-  btnCustomSubmit.addEventListener('click', uploadCustomText);
+  if (btnNextPrompt) {
+    btnNextPrompt.addEventListener('click', () => {
+      loadPrompt();
+    });
+  }
 
   // --- Init ---
   loadPrompt();

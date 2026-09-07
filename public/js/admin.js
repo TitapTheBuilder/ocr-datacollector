@@ -162,10 +162,11 @@
       return;
     }
     empty.style.display = 'none';
-    grid.innerHTML = images.map(img => `
+    grid.innerHTML = images.map(img => {
+      const folder = img.status === 'approved' ? 'approved' : 'pending';
+      return `
       <div class="image-card" data-id="${img.id}">
-        <img src="/uploads/pending/${img.filename}" alt="" loading="lazy"
-             onerror="this.src='/uploads/approved/${img.filename}'">
+        <img src="/uploads/${folder}/${img.filename}" alt="" loading="lazy">
         <div class="image-card-info">
           <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
           <div class="meta">
@@ -175,7 +176,8 @@
           <span class="status-badge ${img.status}">${statusLabel(img.status)}</span>
         </div>
       </div>
-    `).join('');
+      `;
+    }).join('');
 
     grid.querySelectorAll('.image-card').forEach(card => {
       card.addEventListener('click', () => openModal(parseInt(card.dataset.id)));
@@ -200,43 +202,44 @@
 
   // --- Modal ---
   async function openModal(imageId) {
-    const res = await fetch(`/api/admin/images`);
-    // We'll use the grid data instead of a separate endpoint to avoid extra API call
-    // Actually let's fetch from a simpler approach - read from the existing loaded data
-    // For simplicity, we'll show the modal with what we have from the card
-    const allRes = await fetch(`/api/admin/images?limit=1000`);
-    const allData = await allRes.json();
-    const img = allData.images.find(i => i.id === imageId);
-    if (!img) return;
+    try {
+      const res = await fetch(`/api/admin/images/${imageId}`);
+      if (!res.ok) return;
+      const img = await res.json();
+      if (!img) return;
 
-    modalTitle.textContent = `تصویر #${img.id}`;
-    modalImg.src = `/uploads/pending/${img.filename}`;
-    modalImg.onerror = function() { this.src = `/uploads/approved/${img.filename}`; };
+      const folder = img.status === 'approved' ? 'approved' : 'pending';
 
-    modalInfo.innerHTML = `
-      <p><strong>متن:</strong> ${escapeHtml(img.prompt_text || img.custom_text || '—')}</p>
-      <p><strong>دسته:</strong> ${img.prompt_category || '—'}</p>
-      <p><strong>مشارکت‌کننده:</strong> ${img.contributor_id.substring(0, 12)}...</p>
-      <p><strong>تاریخ:</strong> ${formatDate(img.created_at)}</p>
-      <p><strong>وضعیت:</strong> <span class="status-badge ${img.status}">${statusLabel(img.status)}</span></p>
-      ${img.rejection_reason ? `<p><strong>دلیل رد:</strong> ${escapeHtml(img.rejection_reason)}</p>` : ''}
-      ${img.drive_file_id ? `<p><strong>Drive ID:</strong> ${img.drive_file_id}</p>` : ''}
-    `;
+      modalTitle.textContent = `تصویر #${img.id}`;
+      modalImg.src = `/uploads/${folder}/${img.filename}`;
 
-    let actionsHtml = '';
-    if (img.status === 'pending') {
-      actionsHtml = `
-        <button class="btn btn-success" onclick="adminAction(${img.id}, 'approved')">تایید</button>
-        <button class="btn btn-danger" onclick="adminAction(${img.id}, 'rejected')">رد کردن</button>
+      modalInfo.innerHTML = `
+        <p><strong>متن:</strong> ${escapeHtml(img.prompt_text || img.custom_text || '—')}</p>
+        <p><strong>دسته:</strong> ${img.prompt_category || '—'}</p>
+        <p><strong>مشارکت‌کننده:</strong> ${img.contributor_id.substring(0, 12)}...</p>
+        <p><strong>تاریخ:</strong> ${formatDate(img.created_at)}</p>
+        <p><strong>وضعیت:</strong> <span class="status-badge ${img.status}">${statusLabel(img.status)}</span></p>
+        ${img.rejection_reason ? `<p><strong>دلیل رد:</strong> ${escapeHtml(img.rejection_reason)}</p>` : ''}
+        ${img.drive_file_id ? `<p><strong>Drive ID:</strong> ${img.drive_file_id}</p>` : ''}
       `;
-    } else if (img.status === 'approved' && !img.drive_file_id) {
-      actionsHtml = `
-        <button class="btn btn-primary" onclick="syncSingle(${img.id})">همگام‌سازی با درایو</button>
-      `;
+
+      let actionsHtml = '';
+      if (img.status === 'pending') {
+        actionsHtml = `
+          <button class="btn btn-success" onclick="adminAction(${img.id}, 'approved')">تایید</button>
+          <button class="btn btn-danger" onclick="adminAction(${img.id}, 'rejected')">رد کردن</button>
+        `;
+      } else if (img.status === 'approved' && !img.drive_file_id) {
+        actionsHtml = `
+          <button class="btn btn-primary" onclick="syncSingle(${img.id})">همگام‌سازی با درایو</button>
+        `;
+      }
+      modalActions.innerHTML = actionsHtml;
+
+      imageModal.classList.add('active');
+    } catch (err) {
+      console.error('Error opening image modal:', err);
     }
-    modalActions.innerHTML = actionsHtml;
-
-    imageModal.classList.add('active');
   }
 
   modalClose.addEventListener('click', () => imageModal.classList.remove('active'));
@@ -326,17 +329,58 @@
 
   window.deletePrompt = async function(id) {
     if (!confirm('آیا از حذف این متن مطمئن هستید؟')) return;
-    await fetch(`/api/admin/prompts/${id}`, { method: 'DELETE' });
-    loadPrompts();
+    try {
+      const res = await fetch(`/api/admin/prompts/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        loadPrompts();
+      } else {
+        alert('خطا: ' + (data.error || 'امکان حذف متن وجود ندارد.'));
+      }
+    } catch {
+      alert('خطا در حذف متن');
+    }
   };
+
+  // Add manual prompt form
+  const addPromptForm = document.getElementById('addPromptForm');
+  const manualPromptText = document.getElementById('manualPromptText');
+  const manualPromptCategory = document.getElementById('manualPromptCategory');
+
+  if (addPromptForm) {
+    addPromptForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = manualPromptText.value.trim();
+      const category = manualPromptCategory.value;
+      if (!text) return;
+
+      try {
+        const res = await fetch('/api/admin/prompts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, category }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          manualPromptText.value = '';
+          loadPrompts();
+        } else {
+          alert('خطا: ' + (data.error || 'نامشخص'));
+        }
+      } catch {
+        alert('خطا در افزودن متن');
+      }
+    });
+  }
 
   csvInput.addEventListener('change', async () => {
     const file = csvInput.files[0];
     if (!file) return;
 
     const formData = new FormData();
-    formData.append('csv', file);
+    // Append category before file
     formData.append('category', csvCategory.value);
+    formData.append('csv', file);
 
     try {
       const res = await fetch('/api/admin/prompts/upload', { method: 'POST', body: formData });
@@ -356,12 +400,10 @@
   // --- Sync ---
   async function loadSync() {
     try {
-      const res = await fetch('/api/admin/images?status=approved&limit=100');
-      const data = await res.json();
-      const unsynced = (data.images || []).filter(i => !i.drive_file_id);
-      const synced = (data.images || []).filter(i => i.drive_file_id);
+      const res = await fetch('/api/admin/images/unsynced');
+      const unsynced = await res.json();
 
-      if (unsynced.length === 0) {
+      if (!unsynced || unsynced.length === 0) {
         syncGrid.innerHTML = '';
         syncEmpty.style.display = 'block';
         return;
@@ -424,7 +466,9 @@
   function formatDate(s) {
     if (!s) return '—';
     try {
-      return new Date(s + 'Z').toLocaleDateString('fa-IR');
+      // Fix ISO parsing for Safari / WebKit by ensuring 'T' separator
+      const iso = s.includes('T') ? s : s.replace(' ', 'T') + 'Z';
+      return new Date(iso).toLocaleDateString('fa-IR');
     } catch {
       return s;
     }

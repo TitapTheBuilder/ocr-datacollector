@@ -82,11 +82,13 @@ function saveDatabase() {
   if (!db) return;
   const data = db.export();
   const buffer = Buffer.from(data);
-  fs.writeFileSync(config.DB_PATH, buffer);
+  const tempPath = config.DB_PATH + '.tmp';
+  fs.writeFileSync(tempPath, buffer);
+  fs.renameSync(tempPath, config.DB_PATH);
 }
 
-// Auto-save every 30 seconds
-setInterval(() => { if (db) saveDatabase(); }, 30000);
+// Auto-save every 30 seconds (unrefed so it doesn't block shutdown or test scripts)
+setInterval(() => { if (db) saveDatabase(); }, 30000).unref();
 
 // Save on exit
 process.on('exit', () => { if (db) saveDatabase(); });
@@ -177,8 +179,39 @@ function togglePrompt(id, active) {
   return run(`UPDATE prompts SET active = ? WHERE id = ?`, [active ? 1 : 0, id]);
 }
 
+function countPromptImages(promptId) {
+  const row = get(`SELECT COUNT(*) as c FROM images WHERE prompt_id = ?`, [promptId]);
+  return row ? row.c : 0;
+}
+
 function deletePrompt(id) {
+  const imageCount = countPromptImages(id);
+  if (imageCount > 0) {
+    const error = new Error('این متن در تصاویر ارسالی استفاده شده است و نمی‌توان آن را حذف کرد. به جای حذف، می‌توانید آن را غیرفعال کنید.');
+    error.statusCode = 400;
+    throw error;
+  }
   return run(`DELETE FROM prompts WHERE id = ?`, [id]);
+}
+
+function createPromptsBatch(texts, category) {
+  if (!texts || texts.length === 0) return 0;
+  db.run('BEGIN TRANSACTION');
+  let count = 0;
+  try {
+    for (const text of texts) {
+      if (text && text.trim()) {
+        db.run(`INSERT INTO prompts (text, category) VALUES (?, ?)`, [text.trim(), category || 'custom']);
+        count++;
+      }
+    }
+    db.run('COMMIT');
+  } catch (err) {
+    db.run('ROLLBACK');
+    throw err;
+  }
+  saveDatabase();
+  return count;
 }
 
 function createPromptBatch(filename, rowCount) {
@@ -280,6 +313,8 @@ module.exports = {
   getRandomPrompt,
   getAllPrompts,
   createPrompt,
+  createPromptsBatch,
+  countPromptImages,
   togglePrompt,
   deletePrompt,
   createPromptBatch,

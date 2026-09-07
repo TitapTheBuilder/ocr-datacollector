@@ -80,6 +80,34 @@ body {
   margin-bottom: 8px;
 }
 
+.prompt-top-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.btn-text {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.btn-text:hover {
+  background: var(--gray-100);
+  color: var(--primary-hover);
+}
+
 .prompt-category {
   display: inline-block;
   background: var(--gray-100);
@@ -179,6 +207,18 @@ body {
 
 .preview-container.active {
   display: block;
+}
+
+.preview-label-box {
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  font-size: 0.95rem;
+  color: var(--gray-800);
+  text-align: right;
+  word-break: break-word;
 }
 
 .preview-img {

@@ -103,26 +103,40 @@
           <h3>متن‌های نمایشی</h3>
           <div class="csv-upload">
             <select id="csvCategory" class="form-input" style="width:auto;">
-              <option value="numbers">اعداد</option>
               <option value="words">کلمات</option>
+              <option value="numbers">اعداد</option>
               <option value="sentences">جملات</option>
               <option value="custom">سفارشی</option>
             </select>
-            <label for="csvInput" class="btn btn-sm btn-primary">آپلود CSV</label>
+            <label for="csvInput" class="btn btn-sm btn-outline">آپلود CSV / TXT</label>
             <input type="file" id="csvInput" class="file-input" accept=".csv,.txt">
           </div>
         </div>
-        <table class="prompts-table">
-          <thead>
-            <tr>
-              <th>متن</th>
-              <th>دسته</th>
-              <th>وضعیت</th>
-              <th>عملیات</th>
-            </tr>
-          </thead>
-          <tbody id="promptsList"></tbody>
-        </table>
+
+        <form id="addPromptForm" style="display:flex; gap:8px; margin-bottom:20px; flex-wrap:wrap;">
+          <input type="text" id="manualPromptText" class="form-input" placeholder="متن جدید را تایپ کنید..." style="flex:1; min-width:200px;" required>
+          <select id="manualPromptCategory" class="form-input" style="width:auto;">
+            <option value="words">کلمات</option>
+            <option value="numbers">اعداد</option>
+            <option value="sentences">جملات</option>
+            <option value="custom">سفارشی</option>
+          </select>
+          <button type="submit" class="btn btn-sm btn-primary">+ افزودن متن</button>
+        </form>
+
+        <div style="overflow-x:auto;">
+          <table class="prompts-table">
+            <thead>
+              <tr>
+                <th>متن</th>
+                <th>دسته</th>
+                <th>وضعیت</th>
+                <th>عملیات</th>
+              </tr>
+            </thead>
+            <tbody id="promptsList"></tbody>
+          </table>
+        </div>
         <div id="promptsEmpty" class="empty-state" style="display:none;">
           <p>هنوز متنی اضافه نشده است</p>
         </div>

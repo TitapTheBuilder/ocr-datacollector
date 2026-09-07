@@ -47,7 +47,7 @@ async function syncImageToDrive(localPath, filename, mimeType) {
   };
 
   const response = await driveClient.files.create({
-    resource: fileMetadata,
+    requestBody: fileMetadata,
     media: media,
     fields: 'id',
   });
