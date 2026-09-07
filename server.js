@@ -381,17 +381,13 @@ app.post('/api/admin/prompts/upload', requireAdmin, csvUpload.single('csv'), (re
     const category = req.body.category || 'csv-batch';
     let imported = 0;
 
-    const insertMany = db.db.transaction((rows) => {
-      for (const row of rows) {
-        const text = Array.isArray(row) ? row[0] : row.text;
-        if (text && text.trim()) {
-          db.createPrompt(text.trim(), category);
-          imported++;
-        }
+    for (const row of records) {
+      const text = Array.isArray(row) ? row[0] : row.text;
+      if (text && text.trim()) {
+        db.createPrompt(text.trim(), category);
+        imported++;
       }
-    });
-
-    insertMany(records);
+    }
 
     const batch = db.createPromptBatch(req.file.originalname, imported);
 
@@ -449,12 +445,20 @@ app.get('/api/health', (req, res) => {
 });
 
 // --- Start server ---
-const driveReady = drive.initialize();
+async function start() {
+  await db.initDatabase();
+  const driveReady = drive.initialize();
 
-app.listen(config.PORT, config.HOST, () => {
-  console.log(`\n========================================`);
-  console.log(`  OCR Data Collector is running!`);
-  console.log(`  http://localhost:${config.PORT}`);
-  console.log(`  Google Drive sync: ${driveReady ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`========================================\n`);
+  app.listen(config.PORT, config.HOST, () => {
+    console.log(`\n========================================`);
+    console.log(`  OCR Data Collector is running!`);
+    console.log(`  http://localhost:${config.PORT}`);
+    console.log(`  Google Drive sync: ${driveReady ? 'ENABLED' : 'DISABLED'}`);
+    console.log(`========================================\n`);
+  });
+}
+
+start().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
