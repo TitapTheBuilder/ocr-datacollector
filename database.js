@@ -77,7 +77,12 @@ async function initDatabase() {
   try { db.run(`ALTER TABLE images ADD COLUMN ip_address TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN file_hash TEXT`); } catch (_) {}
   try { db.run(`CREATE INDEX IF NOT EXISTS idx_images_ip ON images(ip_address)`); } catch (_) {}
-  try { db.run(`CREATE INDEX IF NOT EXISTS idx_images_file_hash ON images(file_hash)`); } catch (_) {}
+  try { db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_images_file_hash_unique ON images(file_hash) WHERE file_hash IS NOT NULL AND status != 'rejected'`); } catch (_) {}
+
+  // Resync sequence to avoid ID reuse after rollback (closes H11)
+  try {
+    db.run(`UPDATE sqlite_sequence SET seq = (SELECT COALESCE(MAX(id), 0) FROM images) WHERE name = 'images'`);
+  } catch (_) {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -409,9 +414,41 @@ function updateImagesStatusBatch(ids, status, rejectionReason) {
   return images;
 }
 
+function getPromptById(id) {
+  if (!id) return null;
+  return get(`SELECT * FROM prompts WHERE id = ?`, [id]);
+}
+
+function cleanupPlantedData() {
+  const sqlPredicate = `
+    contributor_id LIKE 'redteam%' OR contributor_id LIKE 'rt-deep%' OR contributor_id LIKE 'mass-%'
+    OR contributor_id LIKE 'fullchain-%' OR contributor_id LIKE 'poly-probe%' OR contributor_id LIKE 'magic-probe%' OR contributor_id LIKE 'dedup%' OR contributor_id LIKE 'xsreflect%'
+    OR contributor_id LIKE 'errrefl%' OR contributor_id LIKE 'quota-rst%' OR contributor_id LIKE 'rst-race%' OR contributor_id LIKE 'trimtest%' OR contributor_id LIKE 'freshhot%'
+    OR contributor_id LIKE 'finale%' OR contributor_id LIKE 'seq%' OR contributor_id LIKE 'idreuse%' OR contributor_id LIKE 'burst%' OR contributor_id LIKE 'multi%' OR contributor_id LIKE 'hdr%'
+    OR contributor_id LIKE 'diff-%' OR contributor_id LIKE 'htmltest%' OR contributor_id LIKE 'ads-probe%' OR contributor_id LIKE 'trav2%' OR contributor_id LIKE 'dbint%'
+    OR contributor_id IN ('trav-test-id','verify-check-999','attacker-uuid-123','csrf-test-uuid','collide','format-check-1','11111111-2222-3333-4444-555555555555','test_contrib')
+  `;
+
+  const images = all(`SELECT id, filename FROM images WHERE ${sqlPredicate}`);
+  for (const img of images) {
+    for (const d of [config.PENDING_DIR, config.APPROVED_DIR]) {
+      const p = path.join(d, img.filename);
+      if (fs.existsSync(p)) {
+        try { fs.unlinkSync(p); } catch (_) {}
+      }
+    }
+  }
+
+  run(`DELETE FROM images WHERE ${sqlPredicate}`);
+  const contribPredicate = sqlPredicate.replace(/contributor_id/g, 'id');
+  run(`DELETE FROM contributors WHERE ${contribPredicate}`);
+  return images.length;
+}
+
 module.exports = {
   db: { get: () => db },
   initDatabase,
+  cleanupPlantedData,
   createContributor,
   getContributor,
   countContributorUploadsLastHour,
@@ -426,6 +463,7 @@ module.exports = {
   updateImagesStatusBatch,
   getRandomPrompt,
   getAllPrompts,
+  getPromptById,
   createPrompt,
   createPromptsBatch,
   countPromptImages,

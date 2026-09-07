@@ -11,19 +11,31 @@
     });
   }
 
-  // --- Contributor ID ---
+  // --- Contributor Identity & HMAC Token (Closes Finding H1) ---
   let contributorId = localStorage.getItem('contributor_id');
-  if (!contributorId) {
-    contributorId = generateUUID();
-    localStorage.setItem('contributor_id', contributorId);
+  let contributorToken = localStorage.getItem('contributor_token');
+
+  async function ensureContributorIdentity() {
+    if (contributorId && contributorToken) {
+      return { id: contributorId, token: contributorToken };
+    }
+    try {
+      const res = await fetch('/api/contributors/register', { method: 'POST' });
+      const data = await res.json();
+      if (data.success && data.contributor_id && data.token) {
+        contributorId = data.contributor_id;
+        contributorToken = data.token;
+        localStorage.setItem('contributor_id', contributorId);
+        localStorage.setItem('contributor_token', contributorToken);
+      }
+    } catch (e) {
+      console.warn('Contributor registration error:', e);
+    }
+    return { id: contributorId, token: contributorToken };
   }
 
-  // Always register contributor (safe idempotent call)
-  fetch('/api/contributors', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: contributorId }),
-  }).catch(() => {});
+  // Eagerly initiate identity acquisition
+  ensureContributorIdentity();
 
   // --- Elements ---
   const promptText = document.getElementById('promptText');
@@ -60,8 +72,10 @@
   // --- Load prompt ---
   async function loadPrompt() {
     try {
+      await ensureContributorIdentity();
       promptText.textContent = 'در حال بارگذاری متن...';
-      const res = await fetch(`/api/prompts/next?contributor_id=${contributorId}`);
+      const headers = contributorToken ? { 'X-Contributor-Token': contributorToken } : {};
+      const res = await fetch(`/api/prompts/next?contributor_id=${encodeURIComponent(contributorId || '')}`, { headers });
       if (!res.ok) {
         const data = await res.json();
         currentPrompt = null;
@@ -92,9 +106,15 @@
   // --- Load contributor stats ---
   async function loadStats() {
     try {
-      const res = await fetch(`/api/contributors/${contributorId}/count`);
+      await ensureContributorIdentity();
+      if (!contributorId || !contributorToken) return;
+      const res = await fetch(`/api/contributors/${encodeURIComponent(contributorId)}/count`, {
+        headers: { 'X-Contributor-Token': contributorToken },
+      });
       const data = await res.json();
-      statsBar.textContent = `شما تاکنون ${data.count} تصویر ارسال کرده‌اید`;
+      if (data.count !== undefined) {
+        statsBar.textContent = `شما تاکنون ${data.count} تصویر ارسال کرده‌اید`;
+      }
     } catch {
       // silent
     }
@@ -280,16 +300,21 @@
     btnSubmit.innerHTML = '<span class="spinner"></span> در حال ارسال...';
 
     try {
+      await ensureContributorIdentity();
       const formData = new FormData();
-      // CRITICAL: Append metadata BEFORE file so Multer parses contributor_id before file streaming
       formData.append('contributor_id', contributorId);
+      if (contributorToken) formData.append('contributor_token', contributorToken);
       const hpVal = document.getElementById('hpWebsite')?.value || '';
       if (hpVal) formData.append('hp_website', hpVal);
       if (promptId) formData.append('prompt_id', promptId);
       if (customText) formData.append('custom_text', customText);
       formData.append('image', selectedFile);
 
-      const res = await fetch('/api/images', { method: 'POST', body: formData });
+      const res = await fetch('/api/images', {
+        method: 'POST',
+        headers: contributorToken ? { 'X-Contributor-Token': contributorToken } : {},
+        body: formData,
+      });
       const data = await res.json();
 
       if (data.success) {
@@ -583,15 +608,21 @@
       }
 
       try {
+        await ensureContributorIdentity();
         const formData = new FormData();
         formData.append('contributor_id', contributorId);
+        if (contributorToken) formData.append('contributor_token', contributorToken);
         const hpVal = document.getElementById('hpWebsite')?.value || '';
         if (hpVal) formData.append('hp_website', hpVal);
         if (promptId) formData.append('prompt_id', promptId);
         if (customText) formData.append('custom_text', customText);
         formData.append('image', blob, `whiteboard_${Date.now()}.jpg`);
 
-        const res = await fetch('/api/images', { method: 'POST', body: formData });
+        const res = await fetch('/api/images', {
+          method: 'POST',
+          headers: contributorToken ? { 'X-Contributor-Token': contributorToken } : {},
+          body: formData,
+        });
         const data = await res.json();
 
         if (data.success) {

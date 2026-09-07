@@ -3,6 +3,7 @@ const multer = require('multer');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 const { parse } = require('csv-parse/sync');
 const archiver = require('archiver');
 const config = require('./config');
@@ -14,19 +15,53 @@ const security = require('./security');
 const app = express();
 app.set('trust proxy', process.env.TRUST_PROXY === 'true');
 
-// Security Headers & Content-Security-Policy
+// 1. Edge Middleware: Block Control Characters & Null-Bytes (Closes Finding H6/H7)
+app.use(security.sanitizeUrlControlChars);
+
+// 2. Strict Security Headers & Content-Security-Policy (Closes Finding L1/L2)
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'");
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'");
   next();
 });
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+// 3. Strict Input Type Guard & Central Normalization (Closes Finding H4 & H12)
+app.use((req, res, next) => {
+  const validateTypes = (obj) => {
+    if (!obj || typeof obj !== 'object') return true;
+    for (const key of Object.keys(obj)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') return false;
+      const val = obj[key];
+      if (typeof val === 'object' && val !== null) {
+        if (!validateTypes(val)) return false;
+      }
+    }
+    return true;
+  };
+
+  if (!validateTypes(req.body) || !validateTypes(req.query)) {
+    return res.status(400).json({ success: false, error: 'ساختار داده‌های ورودی نامعتبر است.' });
+  }
+
+  // Normalize contributor_id
+  if (typeof req.body?.contributor_id === 'string') {
+    req.body.contributor_id = req.body.contributor_id.trim().toLowerCase();
+  }
+  next();
+});
+
 app.use(express.static('public'));
-app.use('/uploads', express.static(config.UPLOAD_DIR));
+app.use('/uploads', (req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'");
+  next();
+}, express.static(config.UPLOAD_DIR));
 
 // Ensure directories exist
 for (const dir of [config.PENDING_DIR, config.APPROVED_DIR]) {
@@ -44,16 +79,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- Multer config (Hardened against Path Traversal) ---
+// --- Multer config (100% Server-Controlled Random Filenames, Closes Finding H3) ---
 const storage = multer.diskStorage({
   destination: config.PENDING_DIR,
   filename: (req, file, cb) => {
-    const rawId = req.body?.contributor_id || 'unknown';
-    const safeContributorId = String(rawId).replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 16) || 'unknown';
+    // Purely server-generated 32-hex random token; ZERO user input in filename on disk
+    const randomToken = crypto.randomBytes(16).toString('hex');
     const ext = file.mimetype === 'image/png' ? '.png' : file.mimetype === 'image/webp' ? '.webp' : '.jpg';
-    const randomToken = crypto.randomBytes(8).toString('hex');
-    const name = `${safeContributorId}_${Date.now()}_${randomToken}${ext}`;
-    cb(null, name);
+    cb(null, `img_${Date.now()}_${randomToken}${ext}`);
   },
 });
 
@@ -175,33 +208,88 @@ const contributorLimiter = new security.MemoryRateLimiter({
   message: 'تعداد درخواست‌های ایجاد شناسه بیش از حد مجاز است. لطفاً بعداً تلاش کنید.',
 });
 
-// Register or acknowledge a contributor
+// Contributor Authentication Middleware (Closes Finding H1)
+function requireContributor(req, res, next) {
+  const token = req.headers['x-contributor-token'] || req.body?.contributor_token || req.query?.contributor_token;
+  if (!token) {
+    return res.status(401).json({ success: false, error: 'احراز هویت الزامی است (توکن یافت نشد).' });
+  }
+
+  const verifiedId = security.verifyContributorToken(token);
+  if (!verifiedId) {
+    return res.status(401).json({ success: false, error: 'توکن هویت نامعتبر یا جعلی است.' });
+  }
+
+  req.contributorId = verifiedId;
+  next();
+}
+
+function identifyContributor(req, res, next) {
+  const token = req.headers['x-contributor-token'] || req.query?.contributor_token;
+  if (token) {
+    req.contributorId = security.verifyContributorToken(token) || null;
+  }
+  next();
+}
+
+// 1. Issue server-side HMAC identity (Closes Finding H1)
+app.post('/api/contributors/register', contributorLimiter.middleware(), (req, res) => {
+  try {
+    const id = crypto.randomUUID();
+    const token = security.generateContributorToken(id);
+    db.createContributor(id, req.headers['user-agent']);
+    res.json({ success: true, contributor_id: id, token });
+  } catch (err) {
+    console.error('[API] POST /api/contributors/register:', err.message);
+    res.status(500).json({ success: false, error: 'خطای سرور' });
+  }
+});
+
+// Backward compatibility: GET /api/register
+app.get('/api/register', contributorLimiter.middleware(), (req, res) => {
+  try {
+    const id = crypto.randomUUID();
+    const token = security.generateContributorToken(id);
+    db.createContributor(id, req.headers['user-agent']);
+    res.json({ success: true, contributor_id: id, token });
+  } catch (err) {
+    console.error('[API] GET /api/register:', err.message);
+    res.status(500).json({ success: false, error: 'خطای سرور' });
+  }
+});
+
+// Backward compatibility: POST /api/contributors
 app.post('/api/contributors', contributorLimiter.middleware(), (req, res) => {
   try {
     const { id } = req.body || {};
-    if (!id || typeof id !== 'string') return res.status(400).json({ success: false, error: 'شناسه الزامی است.' });
-    const safeId = id.trim().replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 64);
-    if (!safeId) return res.status(400).json({ success: false, error: 'فرمت شناسه نامعتبر است.' });
-    db.createContributor(safeId, req.headers['user-agent']);
-    res.json({ success: true, id: safeId });
+    if (!id || typeof id !== 'string' || !security.UUID_REGEX.test(id.trim())) {
+      const newId = crypto.randomUUID();
+      const token = security.generateContributorToken(newId);
+      db.createContributor(newId, req.headers['user-agent']);
+      return res.json({ success: true, id: newId, token });
+    }
+    const cleanId = id.trim().toLowerCase();
+    const token = security.generateContributorToken(cleanId);
+    db.createContributor(cleanId, req.headers['user-agent']);
+    res.json({ success: true, id: cleanId, token });
   } catch (err) {
     console.error('[API] POST /api/contributors:', err.message);
-    res.status(500).json({ success: false, error: 'Server error' });
+    res.status(500).json({ success: false, error: 'خطای سرور' });
   }
 });
 
 // Get next prompt
-app.get('/api/prompts/next', (req, res) => {
+app.get('/api/prompts/next', identifyContributor, (req, res) => {
   try {
-    const { contributor_id } = req.query;
-    const prompt = db.getRandomPrompt(contributor_id);
+    const contributorId = req.contributorId || req.query.contributor_id;
+    const prompt = db.getRandomPrompt(contributorId);
     if (!prompt) {
       return res.status(404).json({ success: false, error: 'هیچ متنی برای نمایش وجود ندارد. لطفاً منتظر بمانید تا ادمین متن‌ها را اضافه کند.' });
     }
     res.json({ id: prompt.id, text: prompt.text, category: prompt.category });
   } catch (err) {
     console.error('[API] GET /api/prompts/next:', err.message);
-    res.status(500).json({ success: false, error: 'Server error' });
+    res.status(500).json({ success: false, error: 'خطای سرور' });
   }
 });
 
@@ -221,7 +309,7 @@ function preUploadSecurityCheck(req, res, next) {
   next();
 }
 
-// Upload image (Protected by pre-multer IP & storage guards, magic-bytes, and SHA-256 deduplication)
+// Upload image (Fully hardened against H1, H2, H3, H5, DoS, polyglot injection)
 app.post(
   '/api/images',
   security.uploadMinuteLimiter.middleware(),
@@ -235,7 +323,7 @@ app.post(
       }
 
       const clientIp = security.getClientIp(req);
-      const { prompt_id, custom_text, contributor_id, hp_website } = req.body;
+      const { prompt_id, custom_text, contributor_id, contributor_token, hp_website } = req.body || {};
 
       // 1. Anti-bot honeypot check
       if (hp_website) {
@@ -243,35 +331,84 @@ app.post(
         return res.status(400).json({ success: false, error: 'درخواست نامعتبر' });
       }
 
-      if (!contributor_id) {
+      // 2. Authenticate Contributor via HMAC Token (Closes Finding H1)
+      const token = req.headers['x-contributor-token'] || contributor_token;
+      if (!token) {
         fs.unlinkSync(req.file.path);
-        return res.status(400).json({ success: false, error: 'contributor_id is required' });
+        return res.status(401).json({ success: false, error: 'ارسال توکن احراز هویت الزامی است.' });
       }
 
-      const safeContributorId = String(contributor_id).trim().replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 64);
-      if (!safeContributorId) {
+      const verifiedContributorId = security.verifyContributorToken(token);
+      if (!verifiedContributorId) {
         fs.unlinkSync(req.file.path);
-        return res.status(400).json({ success: false, error: 'شناسه مشارکت‌کننده نامعتبر است.' });
+        return res.status(401).json({ success: false, error: 'توکن هویت نامعتبر یا جعلی است.' });
       }
 
-      const safeCustomText = custom_text ? String(custom_text).trim().substring(0, 500) : null;
-
-      if (!prompt_id && !safeCustomText) {
+      // Ensure client-supplied contributor_id matches verified token identity
+      if (contributor_id && contributor_id.trim().toLowerCase() !== verifiedContributorId) {
         fs.unlinkSync(req.file.path);
-        return res.status(400).json({ success: false, error: 'Either prompt_id or custom_text is required' });
+        return res.status(403).json({ success: false, error: 'عدم تطابق شناسه مشارکت‌کننده با توکن معتبر.' });
       }
 
-      // 2. Validate Binary Magic Bytes (prevent fake file / garbage uploads)
+      // 3. Strict Input Validation for prompt_id vs custom_text (Closes Finding H2)
+      let finalPromptId = null;
+      let finalCustomText = null;
+
+      if (prompt_id !== undefined && prompt_id !== null && String(prompt_id).trim() !== '') {
+        const pid = parseInt(prompt_id, 10);
+        if (isNaN(pid) || pid <= 0) {
+          fs.unlinkSync(req.file.path);
+          return res.status(400).json({ success: false, error: 'شناسه متن انتخابی نامعتبر است.' });
+        }
+        const promptRow = db.getPromptById(pid);
+        if (!promptRow || !promptRow.active) {
+          fs.unlinkSync(req.file.path);
+          return res.status(400).json({ success: false, error: 'متن انتخاب شده در سامانه فعال نیست یا یافت نشد.' });
+        }
+        finalPromptId = pid;
+      } else if (custom_text !== undefined && custom_text !== null && String(custom_text).trim() !== '') {
+        if (typeof custom_text !== 'string' || custom_text.trim().length === 0 || custom_text.trim().length > 300) {
+          fs.unlinkSync(req.file.path);
+          return res.status(400).json({ success: false, error: 'طول متن دلخواه باید بین ۱ تا ۳۰۰ کاراکتر باشد.' });
+        }
+        if (!/[\u0600-\u06FF]/.test(custom_text)) {
+          fs.unlinkSync(req.file.path);
+          return res.status(400).json({ success: false, error: 'متن دلخواه باید شامل حروف فارسی باشد.' });
+        }
+        finalCustomText = custom_text.trim().replace(/[\x00-\x1f]/g, '');
+      } else {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ success: false, error: 'تعیین یکی از فیلدهای prompt_id یا custom_text الزامی است.' });
+      }
+
+      // 4. Validate Binary Magic Bytes (prevent fake files / garbage uploads)
       const detectedMime = security.validateMagicBytes(req.file.path);
       if (!detectedMime) {
         fs.unlinkSync(req.file.path);
         return res.status(400).json({
           success: false,
-          error: 'فایل ارسالی تصویر معتبر نیست یا محتوای آن تخریب شده است.',
+          error: 'فایل ارسالی تصویر معتبر نیست یا فرمت آن پشتیبانی نمی‌شود.',
         });
       }
 
-      // 3. Prevent duplicate image spam (SHA-256 Hash check)
+      // 5. Re-encode Image with Sharp: Strips tEXt/iTXt chunks, metadata, and polyglots (Closes Finding H5)
+      let finalMime = detectedMime;
+      try {
+        const cleanBuffer = await sharp(req.file.path)
+          .rotate()
+          .png({ compressionLevel: 8 })
+          .toBuffer();
+        fs.writeFileSync(req.file.path, cleanBuffer);
+        finalMime = 'image/png';
+      } catch (sharpErr) {
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        return res.status(400).json({
+          success: false,
+          error: 'تصویر ارسالی قابل پردازش نیست یا محتوای آن آسیب دیده است.',
+        });
+      }
+
+      // 6. Compute File Hash and prevent duplicates (SHA-256 Deduplication)
       const fileHash = await security.computeFileHash(req.file.path);
       const duplicate = db.findByFileHash(fileHash);
       if (duplicate) {
@@ -282,8 +419,8 @@ app.post(
         });
       }
 
-      // 4. Rate limit check for contributor ID
-      const uploadCount = db.countContributorUploadsLastHour(safeContributorId);
+      // 7. Rate limit check for contributor ID
+      const uploadCount = db.countContributorUploadsLastHour(verifiedContributorId);
       if (uploadCount >= config.MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR) {
         fs.unlinkSync(req.file.path);
         return res.status(429).json({
@@ -293,33 +430,17 @@ app.post(
       }
 
       // Ensure contributor exists in database
-      db.createContributor(safeContributorId, req.headers['user-agent']);
+      db.createContributor(verifiedContributorId, req.headers['user-agent']);
 
-      // Fix filename if multer created it with unknown_ prefix
-      let filename = req.file.filename;
-      if (filename.startsWith('unknown_')) {
-        const safePrefix = safeContributorId.substring(0, 16);
-        const fixedName = filename.replace('unknown_', `${safePrefix}_`);
-        const oldPath = req.file.path;
-        const newPath = path.join(path.dirname(oldPath), fixedName);
-        try {
-          fs.renameSync(oldPath, newPath);
-          filename = fixedName;
-          req.file.filename = fixedName;
-          req.file.path = newPath;
-        } catch (renameErr) {
-          console.warn('[API] Could not rename file with contributor prefix:', renameErr.message);
-        }
-      }
-
+      const fileSize = fs.statSync(req.file.path).size;
       const result = db.createImage({
-        filename,
+        filename: req.file.filename,
         originalName: req.file.originalname,
-        promptId: prompt_id || null,
-        customText: safeCustomText,
-        contributorId: safeContributorId,
-        mimeType: detectedMime,
-        fileSize: req.file.size,
+        promptId: finalPromptId,
+        customText: finalCustomText,
+        contributorId: verifiedContributorId,
+        mimeType: finalMime,
+        fileSize: fileSize,
         ipAddress: clientIp,
         fileHash: fileHash,
       });
@@ -328,21 +449,24 @@ app.post(
     } catch (err) {
       console.error('[API] POST /api/images:', err.message);
       if (req.file && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
       }
-      res.status(500).json({ success: false, error: 'Server error' });
+      res.status(500).json({ success: false, error: 'خطای سرور' });
     }
   }
 );
 
-// Contributor upload count
-app.get('/api/contributors/:id/count', (req, res) => {
+// Contributor upload count (Protected: only authenticated contributor can see own count, closes L5)
+app.get('/api/contributors/:id/count', requireContributor, (req, res) => {
   try {
+    if (req.params.id !== req.contributorId) {
+      return res.status(403).json({ success: false, error: 'دسترسی غیرمجاز به اطلاعات سایر کاربران.' });
+    }
     const count = db.getContributorUploadCount(req.params.id);
     res.json({ count });
   } catch (err) {
     console.error('[API] GET /api/contributors/:id/count:', err.message);
-    res.status(500).json({ success: false, error: 'Server error' });
+    res.status(500).json({ success: false, error: 'خطای سرور' });
   }
 });
 
@@ -858,19 +982,26 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// --- Global Error Handling Middleware ---
+// --- Custom 404 Handler (Closes Finding L4) ---
+app.use((req, res) => {
+  res.status(404).json({ success: false, error: 'مسیر مورد نظر یافت نشد.' });
+});
+
+// --- Global Error Handling Middleware (Closes Finding H3 / H4 - Zero Info Leak) ---
 app.use((err, req, res, next) => {
-  console.error('[Global Error]:', err.message);
+  console.error('[Global Error]:', err);
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({ success: false, error: `حجم فایل بیش از حد مجاز است (حداکثر ${config.MAX_FILE_SIZE_MB} مگابایت).` });
     }
-    return res.status(400).json({ success: false, error: 'خطا در بارگذاری فایل: ' + err.message });
+    return res.status(400).json({ success: false, error: 'خطا در بارگذاری فایل.' });
   }
-  if (err) {
-    return res.status(err.statusCode || 400).json({ success: false, error: err.message || 'خطایی در سرور رخ داد.' });
+  if (err.status === 400 && 'body' in err) {
+    return res.status(400).json({ success: false, error: 'فرمت داده‌های ارسالی (JSON) نامعتبر است.' });
   }
-  next();
+  const statusCode = (typeof err.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 500) ? err.statusCode : 500;
+  // NEVER leak internal error message, paths, or stack to client
+  res.status(statusCode).json({ success: false, error: 'خطای سرور' });
 });
 
 // --- Start server ---

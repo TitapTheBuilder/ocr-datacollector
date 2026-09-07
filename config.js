@@ -25,4 +25,5 @@ module.exports = {
   GOOGLE_DRIVE_FOLDER_ID: process.env.GOOGLE_DRIVE_FOLDER_ID || '',
   ADMIN_USERNAME: process.env.ADMIN_USERNAME || 'admin',
   ADMIN_PASSWORD_HASH: process.env.ADMIN_PASSWORD_HASH || '',
+  CONTRIBUTOR_SECRET: process.env.CONTRIBUTOR_SECRET || 'ocr_contrib_sec_2026_8f92ab3c4e1d5a7b8c9d0e1f',
 };

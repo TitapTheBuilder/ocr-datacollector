@@ -25,6 +25,48 @@ function getClientIp(req) {
   return sanitizeIp(rawIp);
 }
 
+// --- Contributor HMAC Token Authentication (Closes Finding H1) ---
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function generateContributorToken(contributorId, secret = config.CONTRIBUTOR_SECRET) {
+  if (!contributorId || !UUID_REGEX.test(contributorId)) {
+    throw new Error('Invalid contributor UUID for token generation');
+  }
+  const sig = crypto.createHmac('sha256', secret).update(contributorId).digest('hex');
+  return `${contributorId}.${sig}`;
+}
+
+function verifyContributorToken(token, secret = config.CONTRIBUTOR_SECRET) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [id, sig] = token.split('.');
+  if (!id || !sig || !UUID_REGEX.test(id)) return null;
+
+  try {
+    const expectedSig = crypto.createHmac('sha256', secret).update(id).digest('hex');
+    const a = Buffer.from(sig, 'hex');
+    const b = Buffer.from(expectedSig, 'hex');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return null;
+    }
+    return id.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+// --- Control Characters / Null-Byte Filter Middleware (Closes Finding H6/H7) ---
+function sanitizeUrlControlChars(req, res, next) {
+  try {
+    const decodedUrl = decodeURIComponent(req.url);
+    if (/[\x00-\x1f]/.test(decodedUrl)) {
+      return res.status(400).json({ success: false, error: 'درخواست نامعتبر است' });
+    }
+  } catch {
+    return res.status(400).json({ success: false, error: 'درخواست نامعتبر است' });
+  }
+  next();
+}
+
 // --- Memory Rate Limiter ---
 class MemoryRateLimiter {
   constructor(options = {}) {
@@ -284,8 +326,12 @@ function startAutoPurgeWorker(db) {
 }
 
 module.exports = {
+  UUID_REGEX,
   sanitizeIp,
   getClientIp,
+  generateContributorToken,
+  verifyContributorToken,
+  sanitizeUrlControlChars,
   MemoryRateLimiter,
   globalApiLimiter,
   uploadMinuteLimiter,
