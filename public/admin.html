@@ -81,13 +81,23 @@
 
     <!-- All Images Tab -->
     <div id="tabAll" class="tab-content">
-      <div style="margin-bottom:16px;">
+      <div style="margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
         <select id="filterStatus" class="form-input" style="width:auto; display:inline-block;">
-          <option value="">همه</option>
+          <option value="">همه وضعیت‌ها</option>
           <option value="pending">در انتظار</option>
           <option value="approved">تایید شده</option>
           <option value="rejected">رد شده</option>
         </select>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <a href="/api/admin/export-zip" class="btn btn-success btn-sm" target="_blank">
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            دانلود کامل دیتاست (فایل ZIP)
+          </a>
+          <a href="/api/admin/export" class="btn btn-outline btn-sm" target="_blank">
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            دانلود CSV
+          </a>
+        </div>
       </div>
       <div id="allGrid" class="image-grid"></div>
       <div id="allEmpty" class="empty-state" style="display:none;">
@@ -199,10 +209,14 @@
       <!-- Sync Images List Card -->
       <div class="prompts-section">
         <div class="prompts-header">
-          <h3>تصاویر تایید شده آماده همگام‌سازی</h3>
-          <div>
-            <button id="btnSyncAll" class="btn btn-primary btn-sm">همگام‌سازی همه تصاویر تایید شده</button>
-            <a href="/api/admin/export" class="btn btn-outline btn-sm" target="_blank">دانلود CSV خروجی</a>
+          <h3>تصاویر تایید شده</h3>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <a href="/api/admin/export-zip" class="btn btn-success btn-sm" target="_blank">
+              <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              دانلود یکجای دیتاست (فایل ZIP)
+            </a>
+            <button id="btnSyncAll" class="btn btn-primary btn-sm">همگام‌سازی با Google Drive</button>
+            <a href="/api/admin/export" class="btn btn-outline btn-sm" target="_blank">دانلود CSV</a>
           </div>
         </div>
         <p style="color:var(--gray-500); font-size:0.9rem;">

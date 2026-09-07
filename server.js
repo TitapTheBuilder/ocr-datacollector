@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { parse } = require('csv-parse/sync');
+const archiver = require('archiver');
 const config = require('./config');
 const db = require('./database');
 const drive = require('./google-drive');
@@ -578,6 +579,85 @@ app.get('/api/admin/export', requireAdmin, (req, res) => {
   } catch (err) {
     console.error('[API] GET /api/admin/export:', err.message);
     res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+function createZipArchive(options) {
+  if (typeof archiver === 'function') {
+    return archiver('zip', options);
+  }
+  if (archiver && archiver.ZipArchive) {
+    return new archiver.ZipArchive(options);
+  }
+  throw new Error('Unsupported archiver module');
+}
+
+// Export full dataset (images + labels.csv) as ZIP archive
+app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
+  try {
+    const images = db.getApprovedForExport();
+    const timestamp = new Date().toISOString().slice(0, 10);
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="persian_ocr_dataset_${timestamp}.zip"`);
+
+    const archive = createZipArchive({
+      zlib: { level: 6 },
+    });
+
+    archive.on('warning', (err) => {
+      if (err.code === 'ENOENT') {
+        console.warn('[API] ZIP warning:', err.message);
+      } else {
+        throw err;
+      }
+    });
+
+    archive.on('error', (err) => {
+      console.error('[API] ZIP archive error:', err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: 'خطا در ایجاد فایل زیپ' });
+      }
+    });
+
+    archive.pipe(res);
+
+    // 1. Generate labels.csv manifest with BOM
+    let csv = 'filename,text_label,contributor_id,created_at,drive_file_id\n';
+    for (const img of images) {
+      const text = (img.prompt_text || img.custom_text || '').replace(/"/g, '""');
+      csv += `"${img.filename}","${text}","${img.contributor_id}","${img.created_at}","${img.drive_file_id || ''}"\n`;
+    }
+    archive.append('\uFEFF' + csv, { name: 'labels.csv' });
+
+    // 2. Generate README.txt
+    const readme = `دیتاست OCR دستنویس فارسی
+مجموع تصاویر تایید شده: ${images.length}
+تاریخ دریافت خروجی: ${new Date().toLocaleString('fa-IR')}
+
+محتوای فایل زیپ:
+1. labels.csv : جدول برچسب‌ها، متن متناظر و مشخصات تصاویر (سازگار با Excel و Python Pandas)
+2. پوشه images/ : شامل فایل‌های تصاویر تایید شده با کیفیت اصلی
+`;
+    archive.append(readme, { name: 'README.txt' });
+
+    // 3. Append images
+    for (const img of images) {
+      let filePath = path.join(config.APPROVED_DIR, img.filename);
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(config.PENDING_DIR, img.filename);
+      }
+      if (fs.existsSync(filePath)) {
+        archive.file(filePath, { name: `images/${img.filename}` });
+      }
+    }
+
+    await archive.finalize();
+  } catch (err) {
+    console.error('[API] GET /api/admin/export-zip:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Server error' });
+    }
   }
 });
 
