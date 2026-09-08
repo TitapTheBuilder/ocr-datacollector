@@ -1,5 +1,7 @@
 (() => {
-  const TARGET_GOAL = 20;
+  const SENTENCE_GOAL = 20;
+  const NUMBER_GOAL = 40;
+  const TOTAL_GOAL = SENTENCE_GOAL + NUMBER_GOAL; // 60 total
 
   // --- Contributor Identity & HMAC Token ---
   let contributorId = localStorage.getItem('contributor_id');
@@ -21,11 +23,14 @@
   const promptText = document.getElementById('promptText');
   const promptCategory = document.getElementById('promptCategory');
   const btnNextPrompt = document.getElementById('btnNextPrompt');
+  const numberGuidanceReminder = document.getElementById('numberGuidanceReminder');
 
   const remainingBadge = document.getElementById('remainingBadge');
   const goalProgressFill = document.getElementById('goalProgressFill');
   const goalCountText = document.getElementById('goalCountText');
   const goalPercentText = document.getElementById('goalPercentText');
+  const sentenceStagePill = document.getElementById('sentenceStagePill');
+  const numberStagePill = document.getElementById('numberStagePill');
 
   const customTextToggle = document.getElementById('customTextToggle');
   const customTextForm = document.getElementById('customTextForm');
@@ -45,6 +50,8 @@
   let selectedFile = null;
   let currentObjectUrl = null;
   let customMode = false;
+  let currentSentencesCount = 0;
+  let currentNumbersCount = 0;
   let currentUploadCount = 0;
 
   // --- Status Messages (Toasts) ---
@@ -152,35 +159,107 @@
   }
 
   // --- Goal & Progress Display ---
-  function updateGoalProgress(count) {
-    currentUploadCount = count;
-    const remaining = Math.max(0, TARGET_GOAL - count);
-    const percent = Math.min(100, Math.round((count / TARGET_GOAL) * 100));
-
-    if (remainingBadge) {
-      if (remaining > 0) {
-        remainingBadge.textContent = `${remaining} جمله باقی‌مانده`;
-        remainingBadge.className = 'remaining-badge';
-      } else {
-        remainingBadge.textContent = 'سهمیه ۲۰ جمله تکمیل شد! 🎉';
-        remainingBadge.className = 'remaining-badge completed';
-      }
+  function updateGoalProgress(sentencesCount, numbersCount, totalCount) {
+    if (typeof sentencesCount === 'number') {
+      currentSentencesCount = sentencesCount;
+      currentNumbersCount = typeof numbersCount === 'number' ? numbersCount : 0;
+      currentUploadCount = typeof totalCount === 'number' ? totalCount : (currentSentencesCount + currentNumbersCount);
+    } else if (typeof sentencesCount === 'object' && sentencesCount !== null) {
+      currentSentencesCount = sentencesCount.sentencesCount || 0;
+      currentNumbersCount = sentencesCount.numbersCount || 0;
+      currentUploadCount = sentencesCount.count || (currentSentencesCount + currentNumbersCount);
+    } else {
+      currentUploadCount = typeof sentencesCount === 'number' ? sentencesCount : 0;
     }
+
+    const totalPercent = Math.min(100, Math.round((currentUploadCount / TOTAL_GOAL) * 100));
 
     if (goalProgressFill) {
-      goalProgressFill.style.width = `${percent}%`;
-    }
-
-    if (goalCountText) {
-      goalCountText.textContent = `${count} از ${TARGET_GOAL} جمله ارسال شده است`;
+      goalProgressFill.style.width = `${totalPercent}%`;
     }
 
     if (goalPercentText) {
-      goalPercentText.textContent = `${percent}٪`;
+      goalPercentText.textContent = `${totalPercent}٪`;
+    }
+
+    const isSentenceStage = currentSentencesCount < SENTENCE_GOAL;
+    const isCompleted = currentSentencesCount >= SENTENCE_GOAL && currentNumbersCount >= NUMBER_GOAL;
+
+    if (remainingBadge) {
+      if (isCompleted) {
+        remainingBadge.textContent = 'سهمیه کامل تکمیل شد! 🎉';
+        remainingBadge.className = 'remaining-badge completed';
+      } else if (isSentenceStage) {
+        const remainingSentences = Math.max(0, SENTENCE_GOAL - currentSentencesCount);
+        remainingBadge.textContent = `${remainingSentences} جمله باقی‌مانده (مرحله ۱)`;
+        remainingBadge.className = 'remaining-badge';
+        remainingBadge.style.background = '#eff6ff';
+        remainingBadge.style.color = '#1d4ed8';
+        remainingBadge.style.borderColor = '#bfdbfe';
+      } else {
+        const remainingNumbers = Math.max(0, NUMBER_GOAL - currentNumbersCount);
+        remainingBadge.textContent = `${remainingNumbers} عدد باقی‌مانده (مرحله ۲)`;
+        remainingBadge.className = 'remaining-badge';
+        remainingBadge.style.background = '#fef3c7';
+        remainingBadge.style.color = '#92400e';
+        remainingBadge.style.borderColor = '#fde68a';
+      }
+    }
+
+    if (goalCountText) {
+      if (isCompleted) {
+        goalCountText.textContent = `کل سهمیه (${TOTAL_GOAL} مورد: ۲۰ جمله و ۴۰ عدد) تکمیل شد!`;
+      } else if (isSentenceStage) {
+        goalCountText.textContent = `مرحله ۱: ${currentSentencesCount} از ${SENTENCE_GOAL} جمله (سپس ۴۰ عدد)`;
+      } else {
+        goalCountText.textContent = `مرحله ۲: ${currentNumbersCount} از ${NUMBER_GOAL} عدد (۲۰ جمله تکمیل شده)`;
+      }
+    }
+
+    if (sentenceStagePill) {
+      if (currentSentencesCount >= SENTENCE_GOAL) {
+        sentenceStagePill.innerHTML = `✅ مرحله ۱: جملات (${SENTENCE_GOAL} از ${SENTENCE_GOAL} تکمیل شد)`;
+        sentenceStagePill.style.background = '#dcfce7';
+        sentenceStagePill.style.color = '#166534';
+        sentenceStagePill.style.borderColor = '#bbf7d0';
+      } else {
+        sentenceStagePill.innerHTML = `📝 مرحله ۱: جملات (${currentSentencesCount} از ${SENTENCE_GOAL}) ◀`;
+        sentenceStagePill.style.background = '#eff6ff';
+        sentenceStagePill.style.color = '#1d4ed8';
+        sentenceStagePill.style.borderColor = '#bfdbfe';
+      }
+    }
+
+    if (numberStagePill) {
+      if (currentNumbersCount >= NUMBER_GOAL) {
+        numberStagePill.innerHTML = `✅ مرحله ۲: اعداد (${NUMBER_GOAL} از ${NUMBER_GOAL} تکمیل شد)`;
+        numberStagePill.style.background = '#dcfce7';
+        numberStagePill.style.color = '#166534';
+        numberStagePill.style.borderColor = '#bbf7d0';
+      } else if (!isSentenceStage) {
+        numberStagePill.innerHTML = `🔢 مرحله ۲: اعداد (${currentNumbersCount} از ${NUMBER_GOAL}) ◀`;
+        numberStagePill.style.background = '#fef3c7';
+        numberStagePill.style.color = '#92400e';
+        numberStagePill.style.borderColor = '#fde68a';
+      } else {
+        numberStagePill.innerHTML = `🔢 مرحله ۲: اعداد (۰ از ${NUMBER_GOAL}) [بعد از جملات]`;
+        numberStagePill.style.background = '#f3f4f6';
+        numberStagePill.style.color = '#6b7280';
+        numberStagePill.style.borderColor = '#e5e7eb';
+      }
     }
 
     if (statsBar) {
-      statsBar.textContent = `مجموع ارسالی‌های شما: ${count} تصویر`;
+      statsBar.textContent = `مجموع ارسالی‌های شما: ${currentUploadCount} تصویر (${currentSentencesCount} جمله + ${currentNumbersCount} عدد)`;
+    }
+
+    // Dynamic placeholder for custom text input according to active stage
+    if (customTextInput) {
+      if (!isSentenceStage) {
+        customTextInput.placeholder = 'عدد مورد نظر خود را با ارقام فارسی بنویسید (مثال: ۴۸۱۵)...';
+      } else {
+        customTextInput.placeholder = 'متن دست‌نویس دلخواه خود را اینجا بنویسید...';
+      }
     }
   }
 
@@ -193,7 +272,7 @@
       });
       const data = await res.json();
       if (data.count !== undefined) {
-        updateGoalProgress(data.count);
+        updateGoalProgress(data.sentencesCount || 0, data.numbersCount || 0, data.count);
       }
     } catch {
       // silent
@@ -204,7 +283,7 @@
   async function loadPrompt() {
     if (!contributorId) return;
     try {
-      promptText.textContent = 'در حال بارگذاری متن...';
+      promptText.textContent = 'در حال بارگذاری...';
       const headers = contributorToken ? { 'X-Contributor-Token': contributorToken } : {};
       const res = await fetch(`/api/prompts/next?contributor_id=${encodeURIComponent(contributorId || '')}`, { headers });
       if (!res.ok) {
@@ -213,6 +292,7 @@
         promptText.textContent = data.error || 'متنی برای نمایش موجود نیست.';
         promptCategory.textContent = '';
         promptCategory.style.display = 'none';
+        if (numberGuidanceReminder) numberGuidanceReminder.style.display = 'none';
         updatePreviewLabel();
         return;
       }
@@ -220,16 +300,26 @@
       promptText.textContent = currentPrompt.text;
       promptCategory.style.display = 'inline-block';
 
-      const categoryLabels = {
-        numbers: 'عدد',
-        words: 'کلمه',
-        sentences: 'جمله',
-        custom: 'سفارشی',
-      };
-      promptCategory.textContent = categoryLabels[currentPrompt.category] || currentPrompt.category;
+      if (currentPrompt.category === 'numbers') {
+        promptCategory.textContent = 'عدد';
+        promptCategory.style.background = '#fef3c7';
+        promptCategory.style.color = '#92400e';
+        if (numberGuidanceReminder) numberGuidanceReminder.style.display = 'flex';
+      } else {
+        const categoryLabels = {
+          words: 'کلمه',
+          sentences: 'جمله',
+          custom: 'سفارشی',
+        };
+        promptCategory.textContent = categoryLabels[currentPrompt.category] || 'جمله';
+        promptCategory.style.background = '#eff6ff';
+        promptCategory.style.color = '#1d4ed8';
+        if (numberGuidanceReminder) numberGuidanceReminder.style.display = 'none';
+      }
       updatePreviewLabel();
     } catch {
       promptText.textContent = 'خطا در بارگذاری متن';
+      if (numberGuidanceReminder) numberGuidanceReminder.style.display = 'none';
       updatePreviewLabel();
     }
   }
@@ -446,7 +536,7 @@
           return;
         }
         if (!/[\u0600-\u06FF]/.test(customText)) {
-          showStatus('متن دلخواه باید شامل حروف فارسی باشد.', 'error');
+          showStatus('متن یا عدد دلخواه باید با حروف یا ارقام فارسی باشد.', 'error');
           customTextInput.focus();
           return;
         }
@@ -480,13 +570,22 @@
         const data = await res.json();
 
         if (data.success) {
-          const newCount = currentUploadCount + 1;
-          const remaining = Math.max(0, TARGET_GOAL - newCount);
+          const wasSentenceStage = currentSentencesCount < SENTENCE_GOAL;
+          await loadStats();
+          const nowSentenceStage = currentSentencesCount < SENTENCE_GOAL;
 
-          if (remaining > 0) {
-            showStatus(`دست‌نوشته با موفقیت ثبت شد! ${remaining} جمله دیگر باقی‌مانده است.`, 'success');
+          if (wasSentenceStage && !nowSentenceStage) {
+            // Milestone: Finished 20 sentences!
+            showStatus('🎉 تبریک! مرحله ۲۰ جمله تکمیل شد. اکنون وارد مرحله نگارش ۴۰ عدد شدید. لطفاً اعداد را حتماً به فارسی بنویسید.', 'success');
+          } else if (currentSentencesCount >= SENTENCE_GOAL && currentNumbersCount >= NUMBER_GOAL) {
+            // Finished full quota!
+            showStatus('تبریک و سپاس فراوان! سهمیه کامل شما (۲۰ جمله و ۴۰ عدد) با موفقیت تکمیل شد 🎉', 'success');
+          } else if (nowSentenceStage) {
+            const rem = Math.max(0, SENTENCE_GOAL - currentSentencesCount);
+            showStatus(`دست‌نوشته با موفقیت ثبت شد! ${rem} جمله دیگر تا شروع مرحله اعداد باقی‌مانده است.`, 'success');
           } else {
-            showStatus('تبریک و سپاس فراوان! سهمیه ۲۰ جمله شما با موفقیت تکمیل شد 🎉', 'success');
+            const rem = Math.max(0, NUMBER_GOAL - currentNumbersCount);
+            showStatus(`عدد با موفقیت ثبت شد! ${rem} عدد دیگر باقی‌مانده است (حتماً با ارقام فارسی).`, 'success');
           }
 
           // Reset preview
@@ -501,12 +600,8 @@
           if (customMode) {
             customTextInput.value = '';
             updatePreviewLabel();
-          } else {
-            loadPrompt();
           }
-
-          // Update stats and progress bar
-          loadStats();
+          loadPrompt();
         } else {
           showStatus(data.error || 'خطا در ارسال تصویر.', 'error');
         }

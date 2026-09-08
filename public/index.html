@@ -37,24 +37,33 @@
         <li>بدون خط خوردگی باشد.</li>
         <li>تصویر افقی باشد.</li>
         <li>محتوای دیگری جز چیز خواسته شده در تصویر نباشد.</li>
+        <li>اعداد را حتماً به فارسی بنویسید.</li>
       </ol>
     </div>
 
-    <!-- Goal & Progress Card (20 Sentences Target) -->
+    <!-- Goal & Progress Card (20 Sentences + 40 Numbers Target) -->
     <div class="goal-card">
       <div class="goal-header">
         <div class="goal-title">
           <span class="goal-icon">🎯</span>
-          <span>سهمیه شما: <strong>۲۰ جمله</strong> دست‌نویس</span>
+          <span>سهمیه شما: <strong>۲۰ جمله</strong> + <strong>۴۰ عدد</strong> دست‌نویس</span>
         </div>
-        <span id="remainingBadge" class="remaining-badge">۲۰ جمله باقی‌مانده</span>
+        <span id="remainingBadge" class="remaining-badge">۲۰ جمله باقی‌مانده (مرحله ۱)</span>
       </div>
       <div class="progress-bar-container">
         <div id="goalProgressFill" class="progress-bar-fill" style="width: 0%;"></div>
       </div>
       <div class="goal-footer">
-        <span id="goalCountText">۰ از ۲۰ جمله ارسال شده است</span>
+        <span id="goalCountText">مرحله ۱: ۰ از ۲۰ جمله (سپس ۴۰ عدد)</span>
         <span id="goalPercentText">۰٪</span>
+      </div>
+      <div class="goal-stage-breakdown" style="display:flex; gap:8px; margin-top:12px; font-size:0.82rem;">
+        <div id="sentenceStagePill" style="flex:1; text-align:center; padding:6px 10px; border-radius:8px; background:#eff6ff; color:#1d4ed8; font-weight:600; border:1px solid #bfdbfe;">
+          📝 مرحله ۱: جملات (۰ از ۲۰)
+        </div>
+        <div id="numberStagePill" style="flex:1; text-align:center; padding:6px 10px; border-radius:8px; background:#f3f4f6; color:#6b7280; font-weight:600; border:1px solid #e5e7eb;">
+          🔢 مرحله ۲: اعداد (۰ از ۴۰)
+        </div>
       </div>
     </div>
 
@@ -69,6 +78,12 @@
       </div>
       <div class="prompt-label">متن زیر را با خودکار روی برگه سفید بنویسید و عکس افقی بگیرید:</div>
       <div id="promptText" class="prompt-text">در حال بارگذاری...</div>
+
+      <!-- Persian Number Warning / Guideline Reminder -->
+      <div id="numberGuidanceReminder" style="display:none; background:#fffbeb; border:1.5px dashed #f59e0b; color:#92400e; padding:10px 14px; border-radius:8px; font-size:0.86rem; margin-top:12px; align-items:center; gap:8px;">
+        <span style="font-size:1.25rem;">🔢</span>
+        <div><strong>توجه (مرحله اعداد):</strong> این عدد را روی کاغذ سفید حتماً به <u>ارقام فارسی</u> بنویسید (مانند ۱۲۳۴۵ نه 12345).</div>
+      </div>
     </div>
 
     <!-- Capture & Upload Area (Whiteboard Removed) -->
@@ -128,10 +143,10 @@
       <div class="modal-header-icon">✍️</div>
       <h2>نام و نام خانوادگی</h2>
       <p class="modal-desc">
-        جهت ثبت دقیق دست‌خط و مشخص بودن ارسال‌کننده در سامانه، لطفاً نام و نام خانوادگی خود را وارد کنید:
+        جهت ثبت دقیق دست‌خط و مشخص بودن ارسال‌کننده، ابتدا <strong>۲۰ جمله</strong> و پس از آن <strong>۴۰ عدد</strong> جهت نگارش به شما نمایش داده خواهد شد:
       </p>
       <div class="modal-goal-note">
-        🎯 سهمیه هر مشارکت‌کننده: <strong>۲۰ جمله دست‌نویس</strong>
+        🎯 سهمیه شما: <strong>۲۰ جمله</strong> + <strong>۴۰ عدد</strong> دست‌نویس فارسی
       </div>
       <form id="nameForm">
         <div class="form-group" style="text-align:right;">

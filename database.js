@@ -19,8 +19,9 @@ async function initDatabase() {
     db = new SQL.Database();
   }
 
-  db.run('PRAGMA journal_mode = WAL');
-  db.run('PRAGMA foreign_keys = ON');
+  // Note: sql.js is a WebAssembly in-memory SQLite. PRAGMA journal_mode and
+  // foreign_keys are no-ops. Persistence is handled by manual saveDatabase()
+  // calls, and referential integrity is enforced at the application level.
 
   db.run(`
     CREATE TABLE IF NOT EXISTS contributors (
@@ -108,13 +109,39 @@ function saveDatabase() {
   fs.renameSync(tempPath, config.DB_PATH);
 }
 
-// Auto-save every 30 seconds (unrefed so it doesn't block shutdown or test scripts)
-setInterval(() => { if (db) saveDatabase(); }, 30000).unref();
+// --- Debounced persistence: mark dirty on every write, flush at most every 5s ---
+let _dbDirty = false;
+let _saveTimer = null;
+
+function markDirty() {
+  _dbDirty = true;
+  if (!_saveTimer) {
+    _saveTimer = setTimeout(() => {
+      _saveTimer = null;
+      flushIfDirty();
+    }, 5000);
+    _saveTimer.unref();
+  }
+}
+
+function flushIfDirty() {
+  if (_saveTimer) {
+    clearTimeout(_saveTimer);
+    _saveTimer = null;
+  }
+  if (_dbDirty && db) {
+    _dbDirty = false;
+    saveDatabase();
+  }
+}
+
+// Periodic safety-net save every 30s (catches edge cases where markDirty timer was GC'd)
+setInterval(() => { flushIfDirty(); }, 30000).unref();
 
 // Save on exit
 process.on('exit', () => { if (db) saveDatabase(); });
-process.on('SIGINT', () => { if (db) saveDatabase(); process.exit(); });
-process.on('SIGTERM', () => { if (db) saveDatabase(); process.exit(); });
+process.on('SIGINT', () => { flushIfDirty(); process.exit(); });
+process.on('SIGTERM', () => { flushIfDirty(); process.exit(); });
 
 // Helper: run a query and return all rows
 function all(sql, params = []) {
@@ -145,27 +172,19 @@ function run(sql, params = []) {
   db.run(sql, params);
   const lastId = db.exec("SELECT last_insert_rowid() as id")[0]?.values[0][0] || 0;
   const changes = db.getRowsModified();
-  saveDatabase();
+  markDirty();
   return { lastInsertRowid: lastId, changes };
 }
 
 // --- Contributors ---
 
 function createContributor(id, name, userAgent) {
-  // Support both createContributor(id, name, userAgent) and legacy createContributor(id, userAgent)
-  let actualName = name;
-  let actualUserAgent = userAgent;
-  if (arguments.length === 2 && typeof name === 'string' && (name.includes('Mozilla') || name.includes('curl') || name.includes('node') || name.length > 50)) {
-    // Legacy call where 2nd argument was userAgent
-    actualUserAgent = name;
-    actualName = null;
-  }
   run(`
     INSERT INTO contributors (id, name, user_agent) VALUES (?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = COALESCE(excluded.name, contributors.name),
       user_agent = COALESCE(excluded.user_agent, contributors.user_agent)
-  `, [id, actualName || null, actualUserAgent || null]);
+  `, [id, name || null, userAgent || null]);
 }
 
 function getContributor(id) {
@@ -197,32 +216,106 @@ function countContributorUploadsLastHour(id) {
 // are not all sent the same line while it waits for review.
 //
 // The contributor's own last 5 are still excluded, so nobody is asked to write
-// the same line twice in a row. If that exclusion empties the pool (a tiny
-// prompt list), the fallback drops it rather than returning nothing.
-function getRandomPrompt(contributorId) {
-  let recentIds = [];
-  if (contributorId) {
-    recentIds = all(`SELECT prompt_id FROM images WHERE contributor_id = ? AND prompt_id IS NOT NULL ORDER BY created_at DESC LIMIT 5`, [contributorId]).map(r => r.prompt_id);
+// Detailed contributor progress tracking (sentences vs numbers)
+function getContributorProgress(contributorId) {
+  if (!contributorId) return { sentences: 0, numbers: 0, total: 0 };
+
+  const rows = all(`
+    SELECT i.prompt_id, i.custom_text, p.category
+    FROM images i
+    LEFT JOIN prompts p ON i.prompt_id = p.id
+    WHERE i.contributor_id = ? AND i.status != 'rejected'
+  `, [contributorId]);
+
+  let sentences = 0;
+  let numbers = 0;
+
+  for (const row of rows) {
+    if (row.category === 'numbers') {
+      numbers++;
+    } else if (row.prompt_id && row.category && row.category !== 'numbers') {
+      sentences++;
+    } else if (row.custom_text) {
+      const isNumber = /^[\d\s۰-۹\u06F0-\u06F9\u0660-\u0669\-+.,/]+$/.test(row.custom_text.trim());
+      if (isNumber) {
+        numbers++;
+      } else {
+        sentences++;
+      }
+    } else {
+      sentences++;
+    }
   }
 
-  // RANDOM() breaks ties, so concurrent users on an all-zero pool get
-  // different lines instead of colliding on the lowest id.
-  const leastCollected = (excludeIds) => {
+  return {
+    sentences,
+    numbers,
+    total: sentences + numbers,
+  };
+}
+
+// Serve the LEAST-COLLECTED prompt sequenced:
+// Stage 1 (first 20): sentences/words (category != 'numbers')
+// Stage 2 (next 40): numbers (category = 'numbers')
+function getRandomPrompt(contributorId, forcedCategory = null) {
+  let targetCategory = forcedCategory;
+
+  if (!targetCategory && contributorId) {
+    const progress = getContributorProgress(contributorId);
+    if (progress.sentences < 20) {
+      targetCategory = 'sentences';
+    } else {
+      targetCategory = 'numbers';
+    }
+  }
+
+  let doneIds = [];
+  if (contributorId) {
+    // Exclude ALL prompts this contributor has already written (not just last 5)
+    doneIds = all(
+      `SELECT DISTINCT prompt_id FROM images WHERE contributor_id = ? AND prompt_id IS NOT NULL AND status != 'rejected'`,
+      [contributorId]
+    ).map(r => r.prompt_id);
+  }
+
+  const leastCollected = (excludeIds, categoryCondition, params = []) => {
     const exclude = excludeIds.length
       ? `AND p.id NOT IN (${excludeIds.map(() => '?').join(',')})`
       : '';
+    const catSql = categoryCondition ? `AND (${categoryCondition})` : '';
+    const allParams = [...excludeIds, ...params];
+
     return get(`
       SELECT p.*, COUNT(i.id) AS collected
       FROM prompts p
       LEFT JOIN images i ON i.prompt_id = p.id AND i.status != 'rejected'
-      WHERE p.active = 1 ${exclude}
+      WHERE p.active = 1 ${exclude} ${catSql}
       GROUP BY p.id
       ORDER BY collected ASC, RANDOM()
       LIMIT 1
-    `, excludeIds);
+    `, allParams);
   };
 
-  return leastCollected(recentIds) || leastCollected([]);
+  let prompt = null;
+
+  if (targetCategory === 'numbers') {
+    prompt = leastCollected(doneIds, "p.category = 'numbers'");
+    if (!prompt && !contributorId) {
+      prompt = leastCollected([], "p.category = 'numbers'");
+    }
+  } else if (targetCategory === 'sentences') {
+    prompt = leastCollected(doneIds, "p.category != 'numbers'");
+    if (!prompt && !contributorId) {
+      prompt = leastCollected([], "p.category != 'numbers'");
+    }
+  } else {
+    prompt = leastCollected(doneIds, null);
+    if (!prompt && !contributorId) {
+      prompt = leastCollected([], null);
+    }
+  }
+
+  return prompt;
 }
 
 function getAllPrompts(activeOnly) {
@@ -271,7 +364,7 @@ function createPromptsBatch(texts, category) {
     db.run('ROLLBACK');
     throw err;
   }
-  saveDatabase();
+  markDirty();
   return count;
 }
 
@@ -279,23 +372,64 @@ function createPromptBatch(filename, rowCount) {
   return run(`INSERT INTO prompt_batches (filename, row_count) VALUES (?, ?)`, [filename, rowCount]);
 }
 
-// --- Images ---
+// Simple JS mutex queue to serialize hash-check + insert (prevents duplicate race, Bug 11)
+let _imageInsertQueue = Promise.resolve();
 
 function createImage(data) {
+  // Application-level FK enforcement (Bug 6: sql.js doesn't enforce FOREIGN KEY)
+  if (!data.contributorId) {
+    throw Object.assign(new Error('شناسه مشارکت‌کننده الزامی است.'), { statusCode: 400 });
+  }
+  const contributor = get(`SELECT id FROM contributors WHERE id = ?`, [data.contributorId]);
+  if (!contributor) {
+    throw Object.assign(new Error('شناسه مشارکت‌کننده در سامانه یافت نشد.'), { statusCode: 400 });
+  }
+  if (data.promptId) {
+    const prompt = get(`SELECT id, active FROM prompts WHERE id = ?`, [data.promptId]);
+    if (!prompt) {
+      throw Object.assign(new Error('متن انتخابی در سامانه یافت نشد.'), { statusCode: 400 });
+    }
+  }
+
+  // Atomic duplicate-hash guard: re-check inside lock to close the race window
+  if (data.fileHash) {
+    const dup = findByFileHash(data.fileHash);
+    if (dup) {
+      throw Object.assign(new Error('DUPLICATE_IMAGE'), { statusCode: 409 });
+    }
+  }
+
   return run(`
     INSERT INTO images (filename, original_name, prompt_id, custom_text, contributor_id, mime_type, file_size, ip_address, file_hash)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     data.filename,
-    data.originalName,
+    data.originalName || null,
     data.promptId || null,
     data.customText || null,
     data.contributorId,
-    data.mimeType,
-    data.fileSize,
+    data.mimeType || null,
+    data.fileSize || 0,
     data.ipAddress || null,
     data.fileHash || null
   ]);
+}
+
+// Serialize createImage calls so two concurrent uploads with the same hash
+// cannot both pass findByFileHash before either row is inserted.
+function createImageSafe(data) {
+  return new Promise((resolve, reject) => {
+    _imageInsertQueue = _imageInsertQueue
+      .catch(() => {}) // don't let a prior rejection block the queue
+      .then(() => {
+        try {
+          const result = createImage(data);
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        }
+      });
+  });
 }
 
 function getImages({ status, page, limit }) {
@@ -444,7 +578,7 @@ function deleteImagesBatch(ids) {
     const placeholders = chunk.map(() => '?').join(',');
     db.run(`DELETE FROM images WHERE id IN (${placeholders})`, chunk);
   }
-  saveDatabase();
+  markDirty();
   return ids.length;
 }
 
@@ -463,7 +597,7 @@ function updateImagesStatusBatch(ids, status, rejectionReason) {
       WHERE id IN (${chunkPlaceholders})
     `, [status, rejectionReason || null, ...chunk]);
   }
-  saveDatabase();
+  markDirty();
   return images;
 }
 
@@ -524,6 +658,7 @@ module.exports = {
   deletePrompt,
   createPromptBatch,
   createImage,
+  createImageSafe,
   getImages,
   getImage,
   updateImageStatus,
@@ -531,7 +666,11 @@ module.exports = {
   getApprovedUnsynced,
   getStats,
   getContributorUploadCount,
+  getContributorProgress,
   getApprovedForExport,
   getSetting,
   setSetting,
+  saveDatabase,
+  flushIfDirty,
+  markDirty,
 };

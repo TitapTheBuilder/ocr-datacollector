@@ -9,7 +9,20 @@ const archiver = require('archiver');
 const config = require('./config');
 const db = require('./database');
 const drive = require('./google-drive');
+const githubSync = require('./github-sync');
 const security = require('./security');
+
+// --- CSV formula injection protection (Bug 5) ---
+// Prefix values starting with formula-trigger characters so Excel/Sheets
+// won't interpret them as formulas when the admin opens the export.
+function csvSafeCell(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (/^\s*[=+\-@\t\r]/.test(str)) {
+    return "'" + str;
+  }
+  return str;
+}
 
 // --- Setup ---
 const app = express();
@@ -199,12 +212,14 @@ function verifyPassword(password, stored) {
   }
 }
 
-// Auto-generate default admin password if not set
+// Auto-generate a random admin password if not configured
 if (!config.ADMIN_PASSWORD_HASH) {
-  const defaultHash = generatePasswordHash('admin123');
-  console.log('[Admin] No password hash configured. Default password: admin123');
-  console.log('[Admin] Hash:', defaultHash);
-  console.log('[Admin] Add ADMIN_PASSWORD_HASH=' + defaultHash + ' to .env file');
+  const randomPassword = crypto.randomBytes(12).toString('base64url');
+  const defaultHash = generatePasswordHash(randomPassword);
+  console.log('[Admin] ⚠️  No ADMIN_PASSWORD_HASH configured.');
+  console.log(`[Admin] Generated random admin password for this session: ${randomPassword}`);
+  console.log('[Admin] To persist this password, add the following to your .env file:');
+  console.log(`[Admin] ADMIN_PASSWORD_HASH=${defaultHash}`);
   config.ADMIN_PASSWORD_HASH = defaultHash;
 }
 
@@ -321,12 +336,37 @@ app.post('/api/contributors', contributorLimiter.middleware(), (req, res) => {
 // Get next prompt
 app.get('/api/prompts/next', identifyContributor, (req, res) => {
   try {
-    const contributorId = req.contributorId || req.query.contributor_id;
-    const prompt = db.getRandomPrompt(contributorId);
+    const contributorId = req.contributorId || (req.query.contributor_id ? req.query.contributor_id.trim().toLowerCase() : null);
+    const category = req.query.category || null;
+    const prompt = db.getRandomPrompt(contributorId, category);
     if (!prompt) {
+      const progress = contributorId ? db.getContributorProgress(contributorId) : null;
+      if (progress && progress.sentences >= 20) {
+        return res.status(404).json({
+          success: false,
+          error: 'سهمیه ۲۰ جمله شما تکمیل شد. متن‌های مرحله اعداد هنوز توسط مدیر سیستم اضافه نشده است. لطفاً منتظر بمانید تا مدیر فایل اعداد را بارگذاری کند.',
+        });
+      }
       return res.status(404).json({ success: false, error: 'هیچ متنی برای نمایش وجود ندارد. لطفاً منتظر بمانید تا ادمین متن‌ها را اضافه کند.' });
     }
-    res.json({ id: prompt.id, text: prompt.text, category: prompt.category });
+
+    let stageInfo = null;
+    if (contributorId) {
+      const progress = db.getContributorProgress(contributorId);
+      stageInfo = {
+        sentences: progress.sentences,
+        numbers: progress.numbers,
+        total: progress.total,
+        currentStage: progress.sentences < 20 ? 'sentences' : (progress.numbers < 40 ? 'numbers' : 'completed'),
+      };
+    }
+
+    res.json({
+      id: prompt.id,
+      text: prompt.text,
+      category: prompt.category,
+      stageInfo,
+    });
   } catch (err) {
     console.error('[API] GET /api/prompts/next:', err.message);
     res.status(500).json({ success: false, error: 'خطای سرور' });
@@ -413,7 +453,7 @@ app.post(
         }
         if (!/[\u0600-\u06FF]/.test(custom_text)) {
           fs.unlinkSync(req.file.path);
-          return res.status(400).json({ success: false, error: 'متن دلخواه باید شامل حروف فارسی باشد.' });
+          return res.status(400).json({ success: false, error: 'متن یا عدد دلخواه باید شامل حروف یا ارقام فارسی باشد.' });
         }
         finalCustomText = custom_text.trim().replace(/[\x00-\x1f]/g, '');
       } else {
@@ -504,8 +544,21 @@ app.post(
       const contributorName = req.body?.contributor_name ? String(req.body.contributor_name).trim() : null;
       db.createContributor(verifiedContributorId, contributorName, req.headers['user-agent']);
 
+      // 8. Server-side quota enforcement: 20 sentences + 40 numbers = 60 total (Bug 9)
+      const progress = db.getContributorProgress(verifiedContributorId);
+      if (progress.total >= 60 || (progress.sentences >= 20 && progress.numbers >= 40)) {
+        if (fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch (_) {}
+        }
+        return res.status(403).json({
+          success: false,
+          error: 'سهمیه شما (۲۰ جمله + ۴۰ عدد) تکمیل شده است. از مشارکت شما سپاسگزاریم!',
+        });
+      }
+
       const fileSize = cleanBuffer.length;
-      const result = db.createImage({
+      // Use createImageSafe (mutex-protected) to prevent duplicate hash race (Bug 11)
+      const result = await db.createImageSafe({
         filename: req.file.filename,
         originalName: req.file.originalname,
         promptId: finalPromptId,
@@ -523,12 +576,20 @@ app.post(
       if (req.file && fs.existsSync(req.file.path)) {
         try { fs.unlinkSync(req.file.path); } catch (_) {}
       }
-      res.status(500).json({ success: false, error: 'خطای سرور' });
+      // Handle duplicate image error from createImageSafe gracefully
+      if (err.message === 'DUPLICATE_IMAGE' || err.statusCode === 409) {
+        return res.status(409).json({
+          success: false,
+          error: 'این تصویر قبلاً در سامانه ثبت شده است. لطفاً تصویر جدیدی ارسال کنید.',
+        });
+      }
+      const statusCode = err.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
+      res.status(statusCode).json({ success: false, error: statusCode < 500 ? err.message : 'خطای سرور' });
     }
   }
 );
 
-// Contributor upload count (Protected: only authenticated contributor can see own count, closes L5)
+// Contributor upload count & progress (Protected: only authenticated contributor can see own count, closes L5)
 app.get('/api/contributors/:id/count', requireContributor, (req, res) => {
   try {
     // Compare case-insensitively: tokens issued before ids were lowercased at the
@@ -536,9 +597,14 @@ app.get('/api/contributors/:id/count', requireContributor, (req, res) => {
     if (String(req.params.id).toLowerCase() !== req.contributorId) {
       return res.status(403).json({ success: false, error: 'دسترسی غیرمجاز به اطلاعات سایر کاربران.' });
     }
-    const count = db.getContributorUploadCount(req.contributorId);
+    const progress = db.getContributorProgress(req.contributorId);
     const contributor = db.getContributor(req.contributorId);
-    res.json({ count, name: contributor ? contributor.name : null });
+    res.json({
+      count: progress.total,
+      sentencesCount: progress.sentences,
+      numbersCount: progress.numbers,
+      name: contributor ? contributor.name : null,
+    });
   } catch (err) {
     console.error('[API] GET /api/contributors/:id/count:', err.message);
     res.status(500).json({ success: false, error: 'خطای سرور' });
@@ -842,6 +908,216 @@ app.post('/api/admin/drive/config', requireAdmin, async (req, res) => {
   }
 });
 
+// --- GitHub Sync & Config ---
+
+// Get GitHub config status
+app.get('/api/admin/github/config', requireAdmin, (req, res) => {
+  try {
+    res.json(githubSync.getConfigStatus());
+  } catch (err) {
+    console.error('[API] GET /api/admin/github/config:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// Save GitHub configuration
+app.post('/api/admin/github/config', requireAdmin, async (req, res) => {
+  try {
+    const { token, repo, branch, path: targetPath } = req.body || {};
+
+    if (!repo || !repo.trim()) {
+      return res.status(400).json({ success: false, error: 'نام ریپازیتوری الزامی است.' });
+    }
+
+    // Determine active token (keep existing if placeholder or empty)
+    let activeToken = token ? token.trim() : '';
+    const existingToken = db.getSetting('github_token') || '';
+    if (!activeToken || activeToken.includes('****')) {
+      activeToken = existingToken;
+    }
+
+    if (!activeToken) {
+      return res.status(400).json({ success: false, error: 'توکن دسترسی گیت‌هاب (Personal Access Token) الزامی است.' });
+    }
+
+    const cleanBranch = (branch && branch.trim()) ? branch.trim() : 'main';
+    const cleanPath = (targetPath && targetPath.trim()) ? targetPath.trim().replace(/^\/+|\/+$/g, '') : '';
+
+    // Test connection with credentials before saving
+    const testResult = await githubSync.testConnection({
+      token: activeToken,
+      repo: repo.trim(),
+      branch: cleanBranch,
+    });
+
+    db.setSetting('github_token', activeToken);
+    db.setSetting('github_repo', repo.trim());
+    db.setSetting('github_branch', cleanBranch);
+    db.setSetting('github_path', cleanPath);
+
+    res.json({
+      success: true,
+      message: 'تنظیمات گیت‌هاب با موفقیت ذخیره شد.',
+      details: testResult,
+      status: githubSync.getConfigStatus(),
+    });
+  } catch (err) {
+    console.error('[API] POST /api/admin/github/config:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// Test GitHub connection
+app.post('/api/admin/github/test', requireAdmin, async (req, res) => {
+  try {
+    let { token, repo, branch } = req.body || {};
+
+    let activeToken = token ? token.trim() : '';
+    const existingToken = db.getSetting('github_token') || '';
+    if (!activeToken || activeToken.includes('****')) {
+      activeToken = existingToken;
+    }
+
+    const activeRepo = (repo && repo.trim()) ? repo.trim() : (db.getSetting('github_repo') || '');
+    const activeBranch = (branch && branch.trim()) ? branch.trim() : (db.getSetting('github_branch') || 'main');
+
+    if (!activeToken) {
+      return res.status(400).json({ success: false, error: 'توکن گیت‌هاب وارد نشده است.' });
+    }
+    if (!activeRepo) {
+      return res.status(400).json({ success: false, error: 'نام ریپازیتوری وارد نشده است.' });
+    }
+
+    const result = await githubSync.testConnection({
+      token: activeToken,
+      repo: activeRepo,
+      branch: activeBranch,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// Commit approved dataset to GitHub
+app.post('/api/admin/github/sync', requireAdmin, async (req, res) => {
+  try {
+    const token = db.getSetting('github_token');
+    const repo = db.getSetting('github_repo');
+    const branch = db.getSetting('github_branch') || 'main';
+    const targetPath = (db.getSetting('github_path') || '').replace(/^\/+|\/+$/g, '');
+
+    if (!token || !repo) {
+      return res.status(400).json({ success: false, error: 'ابتدا اطلاعات ریپازیتوری و توکن گیت‌هاب را تنظیم و ذخیره کنید.' });
+    }
+
+    const images = db.getApprovedForExport();
+    if (!images || images.length === 0) {
+      return res.status(400).json({ success: false, error: 'هیچ تصویری با وضعیت تایید شده جهت ارسال وجود ندارد.' });
+    }
+
+    // Resolve images on disk
+    const resolved = [];
+    for (const img of images) {
+      let filePath = path.join(config.APPROVED_DIR, img.filename);
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(config.PENDING_DIR, img.filename);
+      }
+      if (fs.existsSync(filePath)) {
+        resolved.push({ img, filePath });
+      }
+    }
+
+    if (resolved.length === 0) {
+      return res.status(400).json({ success: false, error: 'هیچ فایل تصویری تایید شده‌ای روی دیسک یافت نشد.' });
+    }
+
+    const prefix = targetPath ? `${targetPath}/` : '';
+
+    // 1. Generate labels.csv
+    let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
+    for (const { img } of resolved) {
+      const fn = csvSafeCell(img.filename || '').replace(/"/g, '""');
+      const text = csvSafeCell(img.prompt_text || img.custom_text || '').replace(/"/g, '""');
+      const name = csvSafeCell(img.contributor_name || '').replace(/"/g, '""');
+      const cid = csvSafeCell(img.contributor_id || '').replace(/"/g, '""');
+      const ca = csvSafeCell(img.created_at || '').replace(/"/g, '""');
+      const did = csvSafeCell(img.drive_file_id || '').replace(/"/g, '""');
+      csv += `"${fn}","${text}","${name}","${cid}","${ca}","${did}"\n`;
+    }
+
+    // 2. Generate README.md
+    const readme = `# Persian Handwritten OCR Dataset
+مجموعه داده متن دست‌نویس فارسی جمع‌آوری‌شده توسط سامانه OCR Data Collector.
+
+## مشخصات مجموعه داده
+- **تعداد کل تصاویر تایید شده:** ${resolved.length}
+- **تاریخ آخرین به‌روزرسانی:** ${new Date().toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' })} (${new Date().toISOString().slice(0, 10)})
+- **پوشه‌بندی:** ${targetPath ? `\`${targetPath}/\`` : 'شاخه اصلی ریپازیتوری (Root)'}
+
+## ساختار فایل‌ها
+- \`${prefix}labels.csv\`: جدول برچسب‌ها و مشخصات متناظر تصاویر
+- \`${prefix}images/\`: تصاویر تایید شده با کیفیت اصلی
+
+## ستون‌های موجود در labels.csv
+| ستون | شرح |
+| :--- | :--- |
+| \`filename\` | نام فایل ذخیره شده در پوشه images |
+| \`text_label\` | متن دست‌نویس فارسی تایید شده |
+| \`contributor_name\` | نام و نام خانوادگی مشارکت‌کننده |
+| \`contributor_id\` | شناسه نویسنده |
+| \`created_at\` | تاریخ و زمان بارگذاری |
+| \`drive_file_id\` | شناسه در گوگل درایو (در صورت همگام‌سازی) |
+`;
+
+    // 3. Assemble files array
+    const files = [
+      {
+        path: `${prefix}labels.csv`,
+        content: '\uFEFF' + csv,
+        isBinary: false,
+      },
+      {
+        path: `${prefix}README.md`,
+        content: readme,
+        isBinary: false,
+      },
+    ];
+
+    for (const { img, filePath } of resolved) {
+      files.push({
+        path: `${prefix}images/${img.filename}`,
+        diskPath: filePath,
+        isBinary: true,
+      });
+    }
+
+    const commitMessage = req.body?.message || `Update Persian OCR dataset: ${resolved.length} approved images`;
+
+    const result = await githubSync.commitDataset({
+      token,
+      repo,
+      branch,
+      targetPath,
+      files,
+      message: commitMessage,
+    });
+
+    res.json({
+      success: true,
+      commitUrl: result.commitUrl,
+      commitSha: result.commitSha,
+      branch: result.branch,
+      imageCount: resolved.length,
+      fileCount: files.length,
+    });
+  } catch (err) {
+    console.error('[API] POST /api/admin/github/sync:', err.message);
+    res.status(500).json({ success: false, error: 'خطا در ارسال به گیت‌هاب: ' + err.message });
+  }
+});
+
 // --- Prompt Management ---
 
 // List prompts
@@ -933,9 +1209,13 @@ app.get('/api/admin/export', requireAdmin, (req, res) => {
     const images = db.getApprovedForExport();
     let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
     for (const img of images) {
-      const text = (img.prompt_text || img.custom_text || '').replace(/"/g, '""');
-      const name = (img.contributor_name || '').replace(/"/g, '""');
-      csv += `"${img.filename}","${text}","${name}","${img.contributor_id}","${img.created_at}","${img.drive_file_id || ''}"\n`;
+      const fn = csvSafeCell(img.filename || '').replace(/"/g, '""');
+      const text = csvSafeCell(img.prompt_text || img.custom_text || '').replace(/"/g, '""');
+      const name = csvSafeCell(img.contributor_name || '').replace(/"/g, '""');
+      const cid = csvSafeCell(img.contributor_id || '').replace(/"/g, '""');
+      const ca = csvSafeCell(img.created_at || '').replace(/"/g, '""');
+      const did = csvSafeCell(img.drive_file_id || '').replace(/"/g, '""');
+      csv += `"${fn}","${text}","${name}","${cid}","${ca}","${did}"\n`;
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename=ocr_labels.csv');
@@ -1005,9 +1285,13 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
     // 1. Generate labels.csv manifest with BOM
     let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
     for (const { img } of resolved) {
-      const text = (img.prompt_text || img.custom_text || '').replace(/"/g, '""');
-      const name = (img.contributor_name || '').replace(/"/g, '""');
-      csv += `"${img.filename}","${text}","${name}","${img.contributor_id}","${img.created_at}","${img.drive_file_id || ''}"\n`;
+      const fn = csvSafeCell(img.filename || '').replace(/"/g, '""');
+      const text = csvSafeCell(img.prompt_text || img.custom_text || '').replace(/"/g, '""');
+      const name = csvSafeCell(img.contributor_name || '').replace(/"/g, '""');
+      const cid = csvSafeCell(img.contributor_id || '').replace(/"/g, '""');
+      const ca = csvSafeCell(img.created_at || '').replace(/"/g, '""');
+      const did = csvSafeCell(img.drive_file_id || '').replace(/"/g, '""');
+      csv += `"${fn}","${text}","${name}","${cid}","${ca}","${did}"\n`;
     }
     archive.append('\uFEFF' + csv, { name: 'labels.csv' });
 

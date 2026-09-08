@@ -48,7 +48,7 @@
   const csvInput = document.getElementById('csvInput');
   const csvCategory = document.getElementById('csvCategory');
 
-  // Sync
+  // Sync - Google Drive
   const syncGrid = document.getElementById('syncGrid');
   const syncEmpty = document.getElementById('syncEmpty');
   const btnSyncAll = document.getElementById('btnSyncAll');
@@ -60,6 +60,18 @@
   const btnSaveDrive = document.getElementById('btnSaveDrive');
   const btnTestDrive = document.getElementById('btnTestDrive');
   const driveMsg = document.getElementById('driveMsg');
+
+  // Sync - GitHub
+  const githubConfigForm = document.getElementById('githubConfigForm');
+  const githubStatusBadge = document.getElementById('githubStatusBadge');
+  const githubToken = document.getElementById('githubToken');
+  const githubRepo = document.getElementById('githubRepo');
+  const githubBranch = document.getElementById('githubBranch');
+  const githubPath = document.getElementById('githubPath');
+  const btnSaveGitHub = document.getElementById('btnSaveGitHub');
+  const btnTestGitHub = document.getElementById('btnTestGitHub');
+  const btnCommitGitHub = document.getElementById('btnCommitGitHub');
+  const githubMsg = document.getElementById('githubMsg');
 
   // Modal
   const imageModal = document.getElementById('imageModal');
@@ -177,8 +189,10 @@
         const data = await res.json();
         alert(`پاک‌سازی فوری انجام شد. ${data.purgedCount || 0} تصویر رد شده از روی دیسک و دیتابیس حذف شدند.`);
         loadStats();
-        loadPending();
-        if (typeof loadAll === 'function') loadAll();
+        const activeTabEl = document.querySelector('.tab-btn.active');
+        const activeTab = activeTabEl ? activeTabEl.dataset.tab : 'pending';
+        if (activeTab === 'pending') loadPending();
+        else if (activeTab === 'all') loadAll();
         loadStorageStats();
       } catch (err) {
         alert('خطا در پاک‌سازی تصاویر: ' + err.message);
@@ -379,7 +393,9 @@
 
     let reason = null;
     if (status === 'rejected') {
-      reason = prompt('دلیل رد تصاویر (اختیاری):', '') || null;
+      const input = prompt('دلیل رد تصاویر (اختیاری):', '');
+      if (input === null) return; // Admin clicked Cancel — abort
+      reason = input || null;
     }
 
     try {
@@ -477,6 +493,7 @@
     let rejectionReason = null;
     if (status === 'rejected') {
       rejectionReason = prompt('دلیل رد (اختیاری):');
+      if (rejectionReason === null) return; // Admin clicked Cancel — abort
     }
 
     try {
@@ -731,8 +748,159 @@
     });
   }
 
+  // --- GitHub Sync ---
+  function showGitHubMsg(msg, type) {
+    if (!githubMsg) return;
+    githubMsg.textContent = msg;
+    githubMsg.className = 'status-msg active ' + type;
+  }
+
+  async function loadGitHubConfig() {
+    try {
+      const res = await fetch('/api/admin/github/config');
+      const data = await res.json();
+
+      if (data.isConfigured) {
+        githubStatusBadge.textContent = 'تنظیم شده 🟢';
+        githubStatusBadge.style.background = '#dcfce7';
+        githubStatusBadge.style.color = '#166534';
+      } else {
+        githubStatusBadge.textContent = 'تنظیم نشده ⚪';
+        githubStatusBadge.style.background = '#fee2e2';
+        githubStatusBadge.style.color = '#991b1b';
+      }
+
+      if (data.repo && !githubRepo.value) {
+        githubRepo.value = data.repo;
+      }
+      if (data.branch && !githubBranch.value) {
+        githubBranch.value = data.branch;
+      }
+      if (data.path !== undefined && !githubPath.value) {
+        githubPath.value = data.path;
+      }
+      if (data.hasToken) {
+        githubToken.placeholder = `توکن در سیستم ذخیره شده است (${data.maskedToken})`;
+      }
+    } catch (err) {
+      console.error('Error loading GitHub config:', err);
+    }
+  }
+
+  if (btnTestGitHub) {
+    btnTestGitHub.addEventListener('click', async () => {
+      const token = githubToken.value.trim();
+      const repo = githubRepo.value.trim();
+      const branch = githubBranch.value.trim();
+
+      if (!repo) {
+        showGitHubMsg('لطفاً نام ریپازیتوری را وارد کنید.', 'error');
+        return;
+      }
+
+      btnTestGitHub.disabled = true;
+      btnTestGitHub.innerHTML = '<span class="spinner"></span> در حال بررسی اتصال...';
+
+      try {
+        const res = await fetch('/api/admin/github/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, repo, branch }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          showGitHubMsg(`اتصال به ریپازیتوری «${data.repoFullName}» تایید شد! شاخه: ${data.targetBranch} (${data.branchExists ? 'موجود' : 'شاخه جدید ایجاد خواهد شد'})`, 'success');
+        } else {
+          showGitHubMsg(data.error || 'خطا در برقراری ارتباط با گیت‌هاب.', 'error');
+        }
+      } catch (err) {
+        showGitHubMsg('خطا در برقراری ارتباط با سرور.', 'error');
+      } finally {
+        btnTestGitHub.disabled = false;
+        btnTestGitHub.innerHTML = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> تست اتصال به گیت‌هاب';
+      }
+    });
+  }
+
+  if (githubConfigForm) {
+    githubConfigForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const token = githubToken.value.trim();
+      const repo = githubRepo.value.trim();
+      const branch = githubBranch.value.trim() || 'main';
+      const path = githubPath.value.trim();
+
+      if (!repo) {
+        showGitHubMsg('لطفاً نام ریپازیتوری را وارد کنید.', 'error');
+        return;
+      }
+
+      btnSaveGitHub.disabled = true;
+      btnSaveGitHub.innerHTML = '<span class="spinner"></span> در حال ذخیره و بررسی...';
+
+      try {
+        const res = await fetch('/api/admin/github/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, repo, branch, path }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          showGitHubMsg('تنظیمات گیت‌هاب با موفقیت ذخیره شد و دسترسی به ریپازیتوری تایید گردید.', 'success');
+          githubToken.value = '';
+          loadGitHubConfig();
+        } else {
+          showGitHubMsg(data.error || 'خطا در ذخیره تنظیمات.', 'error');
+        }
+      } catch (err) {
+        showGitHubMsg('خطا در ذخیره تنظیمات در سرور.', 'error');
+      } finally {
+        btnSaveGitHub.disabled = false;
+        btnSaveGitHub.innerHTML = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> ذخیره تنظیمات گیت‌هاب';
+      }
+    });
+  }
+
+  if (btnCommitGitHub) {
+    btnCommitGitHub.addEventListener('click', async () => {
+      if (!confirm('آیا از ارسال و کامیت تمام تصاویر تایید شده به همراه فایل labels.csv و README.md در ریپازیتوری گیت‌هاب اطمینان دارید؟')) {
+        return;
+      }
+
+      btnCommitGitHub.disabled = true;
+      btnCommitGitHub.innerHTML = '<span class="spinner"></span> در حال بارگذاری و کامیت در گیت‌هاب...';
+      showGitHubMsg('در حال بارگذاری تصاویر و ساخت کامیت روی گیت‌هاب، لطفاً منتظر بمانید...', 'info');
+
+      try {
+        const res = await fetch('/api/admin/github/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (data.success) {
+          const commitLink = data.commitUrl
+            ? `<a href="${data.commitUrl}" target="_blank" style="color:var(--primary); font-weight:bold; text-decoration:underline;">[مشاهده کامیت در GitHub ↗]</a>`
+            : '';
+          if (githubMsg) {
+            githubMsg.innerHTML = `✅ کامیت با موفقیت ثبت شد! تعداد ${data.imageCount} تصویر تایید شده روی شاخه «${data.branch}» قرار گرفت. ${commitLink}`;
+            githubMsg.className = 'status-msg active success';
+          }
+          loadStats();
+        } else {
+          showGitHubMsg(data.error || 'خطا در ارسال به گیت‌هاب.', 'error');
+        }
+      } catch (err) {
+        showGitHubMsg('خطا در ارسال درخواست به سرور.', 'error');
+      } finally {
+        btnCommitGitHub.disabled = false;
+        btnCommitGitHub.innerHTML = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/></svg> 🚀 کامیت کل دیتاست در گیت‌هاب';
+      }
+    });
+  }
+
   async function loadSync() {
     loadDriveConfig();
+    loadGitHubConfig();
     try {
       const res = await fetch('/api/admin/images/unsynced');
       const unsynced = await res.json();
