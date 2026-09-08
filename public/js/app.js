@@ -1,46 +1,36 @@
 (() => {
-  // --- Safe UUID Generator for HTTP / Mobile contexts ---
-  function generateUUID() {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      const r = (Math.random() * 16) | 0;
-      const v = c === 'x' ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
-    });
-  }
+  const TARGET_GOAL = 20;
 
-  // --- Contributor Identity & HMAC Token (Closes Finding H1) ---
+  // --- Contributor Identity & HMAC Token ---
   let contributorId = localStorage.getItem('contributor_id');
+  let contributorName = localStorage.getItem('contributor_name');
   let contributorToken = localStorage.getItem('contributor_token');
 
-  async function ensureContributorIdentity() {
-    if (contributorId && contributorToken) {
-      return { id: contributorId, token: contributorToken };
-    }
-    try {
-      const res = await fetch('/api/contributors/register', { method: 'POST' });
-      const data = await res.json();
-      if (data.success && data.contributor_id && data.token) {
-        contributorId = data.contributor_id;
-        contributorToken = data.token;
-        localStorage.setItem('contributor_id', contributorId);
-        localStorage.setItem('contributor_token', contributorToken);
-      }
-    } catch (e) {
-      console.warn('Contributor registration error:', e);
-    }
-    return { id: contributorId, token: contributorToken };
-  }
+  // --- DOM Elements ---
+  const contributorBar = document.getElementById('contributorBar');
+  const contributorNameDisplay = document.getElementById('contributorNameDisplay');
+  const btnChangeName = document.getElementById('btnChangeName');
+  const nameModal = document.getElementById('nameModal');
+  const nameForm = document.getElementById('nameForm');
+  const nameInput = document.getElementById('nameInput');
+  const nameError = document.getElementById('nameError');
+  const btnSubmitName = document.getElementById('btnSubmitName');
 
-  // Eagerly initiate identity acquisition
-  ensureContributorIdentity();
-
-  // --- Elements ---
+  const statusMsg = document.getElementById('statusMsg');
+  const promptCard = document.getElementById('promptCard');
   const promptText = document.getElementById('promptText');
   const promptCategory = document.getElementById('promptCategory');
   const btnNextPrompt = document.getElementById('btnNextPrompt');
+
+  const remainingBadge = document.getElementById('remainingBadge');
+  const goalProgressFill = document.getElementById('goalProgressFill');
+  const goalCountText = document.getElementById('goalCountText');
+  const goalPercentText = document.getElementById('goalPercentText');
+
+  const customTextToggle = document.getElementById('customTextToggle');
+  const customTextForm = document.getElementById('customTextForm');
+  const customTextInput = document.getElementById('customTextInput');
+
   const cameraInput = document.getElementById('cameraInput');
   const fileInput = document.getElementById('fileInput');
   const btnPaste = document.getElementById('btnPaste');
@@ -49,30 +39,171 @@
   const previewLabelText = document.getElementById('previewLabelText');
   const btnSubmit = document.getElementById('btnSubmit');
   const btnRetake = document.getElementById('btnRetake');
-  const statusMsg = document.getElementById('statusMsg');
-  const customTextToggle = document.getElementById('customTextToggle');
-  const customTextForm = document.getElementById('customTextForm');
-  const customTextInput = document.getElementById('customTextInput');
   const statsBar = document.getElementById('statsBar');
 
   let currentPrompt = null;
   let selectedFile = null;
   let currentObjectUrl = null;
   let customMode = false;
+  let currentUploadCount = 0;
 
-  // --- Status messages ---
-  function showStatus(msg, type) {
+  // --- Status Messages (Toasts) ---
+  function showStatus(msg, type = 'info') {
     statusMsg.textContent = msg;
     statusMsg.className = 'status-msg active ' + type;
     if (type === 'success') {
-      setTimeout(() => { statusMsg.className = 'status-msg'; }, 3000);
+      setTimeout(() => { statusMsg.className = 'status-msg'; }, 4000);
     }
   }
 
-  // --- Load prompt ---
-  async function loadPrompt() {
+  // --- Name Modal & Contributor Identity ---
+  function showNameModal(prefill = '') {
+    if (nameInput) {
+      nameInput.value = prefill || contributorName || '';
+    }
+    if (nameError) nameError.style.display = 'none';
+    if (nameModal) nameModal.style.display = 'flex';
+    setTimeout(() => { if (nameInput) nameInput.focus(); }, 100);
+  }
+
+  function hideNameModal() {
+    if (nameModal) nameModal.style.display = 'none';
+  }
+
+  async function registerContributor(name) {
+    btnSubmitName.disabled = true;
+    btnSubmitName.textContent = 'در حال ثبت...';
     try {
-      await ensureContributorIdentity();
+      const res = await fetch('/api/contributors/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      const data = await res.json();
+      if (data.success && data.contributor_id && data.token) {
+        contributorId = data.contributor_id;
+        contributorName = data.name || name.trim();
+        contributorToken = data.token;
+        localStorage.setItem('contributor_id', contributorId);
+        localStorage.setItem('contributor_name', contributorName);
+        localStorage.setItem('contributor_token', contributorToken);
+
+        updateContributorBar();
+        hideNameModal();
+        loadPrompt();
+        loadStats();
+        return true;
+      } else {
+        if (nameError) {
+          nameError.textContent = data.error || 'خطا در ثبت نام. لطفاً مجدداً تلاش کنید.';
+          nameError.style.display = 'block';
+        }
+      }
+    } catch (err) {
+      console.error('Registration error:', err);
+      if (nameError) {
+        nameError.textContent = 'خطای اتصال به سرور. لطفاً اتصال اینترنت خود را بررسی کنید.';
+        nameError.style.display = 'block';
+      }
+    } finally {
+      btnSubmitName.disabled = false;
+      btnSubmitName.textContent = 'ثبت و شروع نوشتن';
+    }
+    return false;
+  }
+
+  function updateContributorBar() {
+    if (contributorName) {
+      contributorNameDisplay.textContent = contributorName;
+      contributorBar.style.display = 'flex';
+    } else {
+      contributorBar.style.display = 'none';
+    }
+  }
+
+  // Handle Name Form Submit
+  if (nameForm) {
+    nameForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const val = nameInput.value.trim();
+      if (!val || val.length < 3) {
+        nameError.textContent = 'لطفاً نام و نام خانوادگی خود را کامل وارد کنید (حداقل ۳ حرف).';
+        nameError.style.display = 'block';
+        return;
+      }
+      await registerContributor(val);
+    });
+  }
+
+  // Handle Edit Name Click
+  if (btnChangeName) {
+    btnChangeName.addEventListener('click', () => {
+      showNameModal(contributorName);
+    });
+  }
+
+  // Initial check: if no contributor info, show modal
+  if (!contributorId || !contributorToken || !contributorName) {
+    showNameModal();
+  } else {
+    updateContributorBar();
+    loadPrompt();
+    loadStats();
+  }
+
+  // --- Goal & Progress Display ---
+  function updateGoalProgress(count) {
+    currentUploadCount = count;
+    const remaining = Math.max(0, TARGET_GOAL - count);
+    const percent = Math.min(100, Math.round((count / TARGET_GOAL) * 100));
+
+    if (remainingBadge) {
+      if (remaining > 0) {
+        remainingBadge.textContent = `${remaining} جمله باقی‌مانده`;
+        remainingBadge.className = 'remaining-badge';
+      } else {
+        remainingBadge.textContent = 'سهمیه ۲۰ جمله تکمیل شد! 🎉';
+        remainingBadge.className = 'remaining-badge completed';
+      }
+    }
+
+    if (goalProgressFill) {
+      goalProgressFill.style.width = `${percent}%`;
+    }
+
+    if (goalCountText) {
+      goalCountText.textContent = `${count} از ${TARGET_GOAL} جمله ارسال شده است`;
+    }
+
+    if (goalPercentText) {
+      goalPercentText.textContent = `${percent}٪`;
+    }
+
+    if (statsBar) {
+      statsBar.textContent = `مجموع ارسالی‌های شما: ${count} تصویر`;
+    }
+  }
+
+  // --- Load Stats ---
+  async function loadStats() {
+    if (!contributorId || !contributorToken) return;
+    try {
+      const res = await fetch(`/api/contributors/${encodeURIComponent(contributorId)}/count`, {
+        headers: { 'X-Contributor-Token': contributorToken },
+      });
+      const data = await res.json();
+      if (data.count !== undefined) {
+        updateGoalProgress(data.count);
+      }
+    } catch {
+      // silent
+    }
+  }
+
+  // --- Load Prompt ---
+  async function loadPrompt() {
+    if (!contributorId) return;
+    try {
       promptText.textContent = 'در حال بارگذاری متن...';
       const headers = contributorToken ? { 'X-Contributor-Token': contributorToken } : {};
       const res = await fetch(`/api/prompts/next?contributor_id=${encodeURIComponent(contributorId || '')}`, { headers });
@@ -103,24 +234,35 @@
     }
   }
 
-  // --- Load contributor stats ---
-  async function loadStats() {
-    try {
-      await ensureContributorIdentity();
-      if (!contributorId || !contributorToken) return;
-      const res = await fetch(`/api/contributors/${encodeURIComponent(contributorId)}/count`, {
-        headers: { 'X-Contributor-Token': contributorToken },
-      });
-      const data = await res.json();
-      if (data.count !== undefined) {
-        statsBar.textContent = `شما تاکنون ${data.count} تصویر ارسال کرده‌اید`;
-      }
-    } catch {
-      // silent
-    }
+  // Next prompt button
+  if (btnNextPrompt) {
+    btnNextPrompt.addEventListener('click', () => {
+      loadPrompt();
+    });
   }
 
-  // --- Update Preview Text Label ---
+  // Custom text toggle
+  if (customTextToggle) {
+    customTextToggle.addEventListener('click', () => {
+      customMode = !customMode;
+      customTextForm.classList.toggle('active', customMode);
+      customTextToggle.textContent = customMode
+        ? '📋 بازگشت به متن پیشنهادی سامانه'
+        : '✏️ نوشتن متن دلخواه به جای متن پیشنهادی';
+      promptCard.style.opacity = customMode ? '0.45' : '1';
+      updatePreviewLabel();
+      if (customMode) {
+        customTextInput.focus();
+      }
+    });
+  }
+
+  if (customTextInput) {
+    customTextInput.addEventListener('input', () => {
+      updatePreviewLabel();
+    });
+  }
+
   function updatePreviewLabel() {
     if (!previewLabelText) return;
     if (customMode) {
@@ -136,12 +278,10 @@
     }
   }
 
-  // --- Handle file selection ---
-  // --- Client-Side Image Compression ---
-  // Compresses phone camera photos (e.g. 5-15MB) to ~200KB before uploading to save storage & bandwidth
-  function compressImage(file, maxDimension = 1600, quality = 0.85) {
+  // --- Client-Side Photo Compression ---
+  function compressImage(file, maxDimension = 1600, quality = 0.88) {
     return new Promise((resolve) => {
-      if (file.size <= 150 * 1024) {
+      if (file.size <= 200 * 1024) {
         return resolve(file);
       }
 
@@ -149,8 +289,7 @@
       const url = URL.createObjectURL(file);
       img.onload = () => {
         URL.revokeObjectURL(url);
-        let width = img.width;
-        let height = img.height;
+        let { width, height } = img;
 
         if (width > maxDimension || height > maxDimension) {
           if (width > height) {
@@ -190,6 +329,7 @@
     });
   }
 
+  // --- File Selection & Preview ---
   async function handleFile(file) {
     if (!file) return;
 
@@ -199,424 +339,138 @@
       return;
     }
 
-    showStatus('در حال آماده‌سازی و بهینه‌سازی تصویر...', 'info');
-    const processedFile = await compressImage(file);
-
-    if (processedFile.size > 2 * 1024 * 1024) {
-      showStatus('حجم فایل بیش از ۲ مگابایت است. لطفاً تصویر کوچک‌تری انتخاب کنید.', 'error');
+    if (file.size > 20 * 1024 * 1024) {
+      showStatus('حجم تصویر بیش از حد مجاز است (حداکثر ۲۰ مگابایت).', 'error');
       return;
+    }
+
+    try {
+      showStatus('در حال بهینه‌سازی تصویر...', 'info');
+      selectedFile = await compressImage(file);
+      statusMsg.className = 'status-msg'; // clear toast
+    } catch {
+      selectedFile = file;
     }
 
     if (currentObjectUrl) {
       URL.revokeObjectURL(currentObjectUrl);
     }
-
-    selectedFile = processedFile;
-    currentObjectUrl = URL.createObjectURL(processedFile);
+    currentObjectUrl = URL.createObjectURL(selectedFile);
     previewImg.src = currentObjectUrl;
     updatePreviewLabel();
     previewContainer.classList.add('active');
-    statusMsg.className = 'status-msg';
+    previewContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
-  cameraInput.addEventListener('change', () => handleFile(cameraInput.files[0]));
-  fileInput.addEventListener('change', () => handleFile(fileInput.files[0]));
+  if (cameraInput) {
+    cameraInput.addEventListener('change', (e) => {
+      if (e.target.files?.[0]) handleFile(e.target.files[0]);
+    });
+  }
 
-  // --- Clipboard Paste Support ---
-  function handlePastedFile(file) {
-    if (!file) return;
-    handleFile(file);
-    showStatus('تصویر با موفقیت از کلیپ‌بورد دریافت شد.', 'info');
+  if (fileInput) {
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files?.[0]) handleFile(e.target.files[0]);
+    });
+  }
+
+  // Clipboard Paste Support
+  if (btnPaste) {
+    btnPaste.addEventListener('click', async () => {
+      try {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const item of clipboardItems) {
+          const imgType = item.types.find(t => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            const file = new File([blob], `paste_${Date.now()}.png`, { type: imgType });
+            handleFile(file);
+            return;
+          }
+        }
+        showStatus('تصویری در کلیپ‌بورد یافت نشد. لطفاً ابتدا عکس را کپی کنید.', 'error');
+      } catch (err) {
+        showStatus('مرورگر اجازه دسترسی به کلیپ‌بورد را نداد. می‌توانید از کلیدهای Ctrl+V استفاده کنید.', 'error');
+      }
+    });
   }
 
   window.addEventListener('paste', (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
-
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
+    for (const item of items) {
       if (item.type.startsWith('image/')) {
         const file = item.getAsFile();
         if (file) {
           e.preventDefault();
-          handlePastedFile(file);
+          handleFile(file);
           return;
         }
       }
     }
   });
 
-  if (btnPaste) {
-    btnPaste.addEventListener('click', async () => {
-      if (navigator.clipboard && navigator.clipboard.read) {
-        try {
-          const clipboardItems = await navigator.clipboard.read();
-          for (const item of clipboardItems) {
-            const imageType = item.types.find(type => type.startsWith('image/'));
-            if (imageType) {
-              const blob = await item.getType(imageType);
-              const ext = imageType === 'image/png' ? 'png' : imageType === 'image/webp' ? 'webp' : 'jpg';
-              const file = new File([blob], `clipboard_${Date.now()}.${ext}`, { type: imageType });
-              handlePastedFile(file);
-              return;
-            }
-          }
-          showStatus('تصویری در کلیپ‌بورد یافت نشد. لطفاً ابتدا یک تصویر را کپی کنید یا کلیدهای Ctrl+V را بزنید.', 'error');
-        } catch {
-          showStatus('برای الصاق تصویر، کلیدهای Ctrl+V را در صفحه فشار دهید.', 'info');
-        }
-      } else {
-        showStatus('برای الصاق تصویر، کلیدهای Ctrl+V را در صفحه فشار دهید.', 'info');
-      }
-    });
-  }
-
-  // --- Submit Upload ---
-  btnSubmit.addEventListener('click', async () => {
-    if (!selectedFile) {
-      showStatus('لطفاً ابتدا یک تصویر انتخاب کنید یا عکس بگیرید.', 'error');
-      return;
-    }
-
-    let promptId = null;
-    let customText = null;
-
-    if (customMode) {
-      customText = customTextInput.value.trim();
-      if (!customText) {
-        showStatus('لطفاً ابتدا متن دست‌نویس خود را تایپ کنید.', 'error');
-        customTextInput.focus();
-        return;
-      }
-    } else {
-      if (!currentPrompt) {
-        showStatus('متن پیشنهادی فعالی وجود ندارد. لطفاً از گزینه «متن دلخواه» استفاده کنید.', 'error');
-        return;
-      }
-      promptId = currentPrompt.id;
-    }
-
-    btnSubmit.disabled = true;
-    btnSubmit.innerHTML = '<span class="spinner"></span> در حال ارسال...';
-
-    try {
-      await ensureContributorIdentity();
-      const formData = new FormData();
-      formData.append('contributor_id', contributorId);
-      if (contributorToken) formData.append('contributor_token', contributorToken);
-      const hpVal = document.getElementById('hpWebsite')?.value || '';
-      if (hpVal) formData.append('hp_website', hpVal);
-      if (promptId) formData.append('prompt_id', promptId);
-      if (customText) formData.append('custom_text', customText);
-      formData.append('image', selectedFile);
-
-      const res = await fetch('/api/images', {
-        method: 'POST',
-        headers: contributorToken ? { 'X-Contributor-Token': contributorToken } : {},
-        body: formData,
-      });
-      const data = await res.json();
-
-      if (data.success) {
-        showStatus('تصویر شما با موفقیت ثبت شد! متشکریم.', 'success');
-        resetCapture();
-        if (customMode) {
-          customTextInput.value = '';
-          updatePreviewLabel();
-        } else {
-          loadPrompt();
-        }
-        loadStats();
-      } else {
-        showStatus(data.error || 'خطا در ارسال تصویر', 'error');
-      }
-    } catch {
-      showStatus('خطا در ارسال تصویر به سرور. لطفاً اتصال اینترنت را بررسی کنید.', 'error');
-    } finally {
-      btnSubmit.disabled = false;
-      btnSubmit.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> تایید و ارسال';
-    }
-  });
-
-  // --- Reset ---
-  function resetCapture() {
-    selectedFile = null;
-    if (currentObjectUrl) {
-      URL.revokeObjectURL(currentObjectUrl);
+  // Retake / Cancel Preview
+  if (btnRetake) {
+    btnRetake.addEventListener('click', () => {
+      selectedFile = null;
+      if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
       currentObjectUrl = null;
-    }
-    previewContainer.classList.remove('active');
-    previewImg.src = '';
-    cameraInput.value = '';
-    fileInput.value = '';
-  }
-
-  btnRetake.addEventListener('click', resetCapture);
-
-  // --- Whiteboard & Mode Switching ---
-  const tabModeWhiteboard = document.getElementById('tabModeWhiteboard');
-  const tabModeUpload = document.getElementById('tabModeUpload');
-  const whiteboardSection = document.getElementById('whiteboardSection');
-  const uploadSection = document.getElementById('uploadSection');
-  const whiteboardCanvas = document.getElementById('whiteboardCanvas');
-  const canvasPlaceholder = document.getElementById('canvasPlaceholder');
-  const toolPen = document.getElementById('toolPen');
-  const toolEraser = document.getElementById('toolEraser');
-  const btnUndo = document.getElementById('btnUndo');
-  const btnClear = document.getElementById('btnClear');
-  const btnSubmitWhiteboard = document.getElementById('btnSubmitWhiteboard');
-  const widthBtns = document.querySelectorAll('.width-btn');
-  const colorBtns = document.querySelectorAll('.color-btn');
-
-  // Mode switching
-  function switchMode(mode) {
-    if (mode === 'whiteboard') {
-      tabModeWhiteboard.classList.add('active');
-      tabModeUpload.classList.remove('active');
-      whiteboardSection.style.display = 'block';
-      uploadSection.style.display = 'none';
-      initCanvasSize();
-    } else {
-      tabModeUpload.classList.add('active');
-      tabModeWhiteboard.classList.remove('active');
-      uploadSection.style.display = 'block';
-      whiteboardSection.style.display = 'none';
-    }
-  }
-
-  tabModeWhiteboard.addEventListener('click', () => switchMode('whiteboard'));
-  tabModeUpload.addEventListener('click', () => switchMode('upload'));
-
-  // Canvas state
-  let ctx = null;
-  let dpr = window.devicePixelRatio || 1;
-  let isDrawing = false;
-  let strokes = []; // Array of { tool, color, width, points: [{x, y}] }
-  let currentStroke = null;
-  let currentTool = 'pen'; // 'pen' | 'eraser'
-  let currentWidth = 6;
-  let currentColor = '#111827';
-  let cssWidth = 0;
-  let cssHeight = 280;
-
-  function initCanvasSize() {
-    if (!whiteboardCanvas) return;
-    const rect = whiteboardCanvas.getBoundingClientRect();
-    const newCssWidth = Math.floor(rect.width) || whiteboardCanvas.parentElement.clientWidth || 500;
-    cssHeight = 280;
-
-    // Only reinitialize if size actually changed or first load
-    if (newCssWidth !== cssWidth || !ctx) {
-      cssWidth = newCssWidth;
-      dpr = window.devicePixelRatio || 1;
-      whiteboardCanvas.width = Math.floor(cssWidth * dpr);
-      whiteboardCanvas.height = Math.floor(cssHeight * dpr);
-      ctx = whiteboardCanvas.getContext('2d');
-      redrawAll();
-    }
-  }
-
-  function redrawAll() {
-    if (!ctx) return;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    // Fill clean white background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, whiteboardCanvas.width, whiteboardCanvas.height);
-
-    // Apply scale for High-DPI
-    ctx.scale(dpr, dpr);
-
-    // Draw all strokes
-    for (const stroke of strokes) {
-      drawStroke(stroke);
-    }
-
-    // Toggle placeholder
-    if (strokes.length === 0 && !isDrawing) {
-      canvasPlaceholder.classList.remove('hidden');
-    } else {
-      canvasPlaceholder.classList.add('hidden');
-    }
-  }
-
-  function drawStroke(stroke) {
-    if (!stroke.points || stroke.points.length === 0) return;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.strokeStyle = stroke.tool === 'eraser' ? '#ffffff' : stroke.color;
-    ctx.lineWidth = stroke.tool === 'eraser' ? stroke.width * 2.5 : stroke.width;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    const pts = stroke.points;
-    if (pts.length === 1) {
-      ctx.arc(pts[0].x, pts[0].y, (ctx.lineWidth) / 2, 0, Math.PI * 2);
-      ctx.fillStyle = ctx.strokeStyle;
-      ctx.fill();
-    } else if (pts.length === 2) {
-      ctx.moveTo(pts[0].x, pts[0].y);
-      ctx.lineTo(pts[1].x, pts[1].y);
-      ctx.stroke();
-    } else {
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length - 1; i++) {
-        const xc = (pts[i].x + pts[i + 1].x) / 2;
-        const yc = (pts[i].y + pts[i + 1].y) / 2;
-        ctx.quadraticCurveTo(pts[i].x, pts[i].y, xc, yc);
-      }
-      ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  function getCanvasCoords(e) {
-    const rect = whiteboardCanvas.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-    };
-  }
-
-  // Pointer event listeners
-  whiteboardCanvas.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    whiteboardCanvas.setPointerCapture(e.pointerId);
-    isDrawing = true;
-    const pt = getCanvasCoords(e);
-    currentStroke = {
-      tool: currentTool,
-      color: currentColor,
-      width: currentWidth,
-      points: [pt],
-    };
-    strokes.push(currentStroke);
-    canvasPlaceholder.classList.add('hidden');
-    redrawAll();
-  });
-
-  whiteboardCanvas.addEventListener('pointermove', (e) => {
-    if (!isDrawing || !currentStroke) return;
-    e.preventDefault();
-    const pt = getCanvasCoords(e);
-    currentStroke.points.push(pt);
-    redrawAll();
-  });
-
-  function endDrawing(e) {
-    if (!isDrawing) return;
-    isDrawing = false;
-    currentStroke = null;
-    try {
-      whiteboardCanvas.releasePointerCapture(e.pointerId);
-    } catch {}
-    redrawAll();
-  }
-
-  whiteboardCanvas.addEventListener('pointerup', endDrawing);
-  whiteboardCanvas.addEventListener('pointercancel', endDrawing);
-
-  // Tool buttons
-  toolPen.addEventListener('click', () => {
-    currentTool = 'pen';
-    toolPen.classList.add('active');
-    toolEraser.classList.remove('active');
-  });
-
-  toolEraser.addEventListener('click', () => {
-    currentTool = 'eraser';
-    toolEraser.classList.add('active');
-    toolPen.classList.remove('active');
-  });
-
-  // Width buttons
-  widthBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      widthBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentWidth = parseInt(btn.dataset.width, 10) || 6;
+      previewContainer.classList.remove('active');
+      if (cameraInput) cameraInput.value = '';
+      if (fileInput) fileInput.value = '';
     });
-  });
+  }
 
-  // Color buttons
-  colorBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      colorBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentColor = btn.dataset.color || '#111827';
-      currentTool = 'pen';
-      toolPen.classList.add('active');
-      toolEraser.classList.remove('active');
-    });
-  });
-
-  // Undo button
-  btnUndo.addEventListener('click', () => {
-    if (strokes.length > 0) {
-      strokes.pop();
-      redrawAll();
-    }
-  });
-
-  // Clear button
-  btnClear.addEventListener('click', () => {
-    strokes = [];
-    redrawAll();
-  });
-
-  // Resize listener
-  window.addEventListener('resize', () => {
-    initCanvasSize();
-  });
-
-  // Submit from whiteboard
-  btnSubmitWhiteboard.addEventListener('click', async () => {
-    if (strokes.length === 0) {
-      showStatus('لطفاً ابتدا متنی روی تخته بنویسید.', 'error');
-      return;
-    }
-
-    let promptId = null;
-    let customText = null;
-
-    if (customMode) {
-      customText = customTextInput.value.trim();
-      if (!customText) {
-        showStatus('لطفاً ابتدا متن دست‌نویس خود را تایپ کنید.', 'error');
-        customTextInput.focus();
+  // --- Submit Image ---
+  if (btnSubmit) {
+    btnSubmit.addEventListener('click', async () => {
+      if (!selectedFile) {
+        showStatus('لطفاً ابتدا یک تصویر انتخاب کنید.', 'error');
         return;
       }
-    } else {
-      if (!currentPrompt) {
-        showStatus('متن پیشنهادی فعالی وجود ندارد. لطفاً از گزینه «متن دلخواه» استفاده کنید.', 'error');
+
+      if (!contributorId || !contributorToken) {
+        showNameModal();
         return;
       }
-      promptId = currentPrompt.id;
-    }
 
-    btnSubmitWhiteboard.disabled = true;
-    btnSubmitWhiteboard.innerHTML = '<span class="spinner"></span> در حال ارسال...';
+      let promptId = null;
+      let customText = null;
 
-    // Convert canvas to JPEG blob
-    whiteboardCanvas.toBlob(async (blob) => {
-      if (!blob) {
-        showStatus('خطا در تبدیل تصویر تخته.', 'error');
-        btnSubmitWhiteboard.disabled = false;
-        btnSubmitWhiteboard.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> تایید و ارسال دست‌نویس';
-        return;
+      if (customMode) {
+        customText = customTextInput.value.trim();
+        if (!customText) {
+          showStatus('لطفاً متن دست‌نویس دلخواه خود را وارد کنید.', 'error');
+          customTextInput.focus();
+          return;
+        }
+        if (!/[\u0600-\u06FF]/.test(customText)) {
+          showStatus('متن دلخواه باید شامل حروف فارسی باشد.', 'error');
+          customTextInput.focus();
+          return;
+        }
+      } else {
+        if (!currentPrompt) {
+          showStatus('متن پیشنهادی فعالی وجود ندارد. لطفاً متن دیگر را بزنید یا از گزینه «متن دلخواه» استفاده کنید.', 'error');
+          return;
+        }
+        promptId = currentPrompt.id;
       }
+
+      btnSubmit.disabled = true;
+      btnSubmit.innerHTML = '<span class="spinner"></span> در حال ارسال و پردازش...';
 
       try {
-        await ensureContributorIdentity();
         const formData = new FormData();
         formData.append('contributor_id', contributorId);
+        formData.append('contributor_name', contributorName || '');
         if (contributorToken) formData.append('contributor_token', contributorToken);
         const hpVal = document.getElementById('hpWebsite')?.value || '';
         if (hpVal) formData.append('hp_website', hpVal);
         if (promptId) formData.append('prompt_id', promptId);
         if (customText) formData.append('custom_text', customText);
-        formData.append('image', blob, `whiteboard_${Date.now()}.jpg`);
+        formData.append('image', selectedFile);
 
         const res = await fetch('/api/images', {
           method: 'POST',
@@ -626,54 +480,46 @@
         const data = await res.json();
 
         if (data.success) {
-          showStatus('دست‌نوشته شما با موفقیت ثبت شد! متشکریم.', 'success');
-          // Clear whiteboard for next entry
-          strokes = [];
-          redrawAll();
+          const newCount = currentUploadCount + 1;
+          const remaining = Math.max(0, TARGET_GOAL - newCount);
 
+          if (remaining > 0) {
+            showStatus(`دست‌نوشته با موفقیت ثبت شد! ${remaining} جمله دیگر باقی‌مانده است.`, 'success');
+          } else {
+            showStatus('تبریک و سپاس فراوان! سهمیه ۲۰ جمله شما با موفقیت تکمیل شد 🎉', 'success');
+          }
+
+          // Reset preview
+          selectedFile = null;
+          if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+          currentObjectUrl = null;
+          previewContainer.classList.remove('active');
+          if (cameraInput) cameraInput.value = '';
+          if (fileInput) fileInput.value = '';
+
+          // Reset custom text if active
           if (customMode) {
             customTextInput.value = '';
             updatePreviewLabel();
           } else {
             loadPrompt();
           }
+
+          // Update stats and progress bar
           loadStats();
         } else {
-          showStatus(data.error || 'خطا در ارسال دست‌نوشته', 'error');
+          showStatus(data.error || 'خطا در ارسال تصویر.', 'error');
         }
-      } catch {
-        showStatus('خطا در ارسال دست‌نوشته به سرور. لطفاً اتصال اینترنت را بررسی کنید.', 'error');
+      } catch (err) {
+        console.error('Upload error:', err);
+        showStatus('خطا در برقراری ارتباط با سرور.', 'error');
       } finally {
-        btnSubmitWhiteboard.disabled = false;
-        btnSubmitWhiteboard.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> تایید و ارسال دست‌نویس';
+        btnSubmit.disabled = false;
+        btnSubmit.innerHTML = `
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+          تایید و ارسال تصویر
+        `;
       }
-    }, 'image/jpeg', 0.92);
-  });
-
-  // --- Custom Text Toggle ---
-  customTextToggle.addEventListener('click', () => {
-    customMode = !customMode;
-    customTextForm.classList.toggle('active', customMode);
-    if (customMode) {
-      customTextToggle.textContent = '↩️ بازگشت به متن پیشنهادی سیستم';
-      customTextInput.focus();
-    } else {
-      customTextToggle.textContent = '✏️ نوشتن متن دلخواه به جای متن پیشنهادی';
-      customTextInput.value = '';
-    }
-    updatePreviewLabel();
-  });
-
-  customTextInput.addEventListener('input', updatePreviewLabel);
-
-  if (btnNextPrompt) {
-    btnNextPrompt.addEventListener('click', () => {
-      loadPrompt();
     });
   }
-
-  // --- Init ---
-  loadPrompt();
-  loadStats();
-  initCanvasSize();
 })();

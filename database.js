@@ -75,7 +75,8 @@ async function initDatabase() {
   // getRandomPrompt LEFT JOINs images by prompt_id on every request.
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_prompt ON images(prompt_id)`);
 
-  // Migrate columns for security: ip_address and file_hash
+  // Migrate columns for security & contributor name
+  try { db.run(`ALTER TABLE contributors ADD COLUMN name TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN ip_address TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN file_hash TEXT`); } catch (_) {}
   try { db.run(`CREATE INDEX IF NOT EXISTS idx_images_ip ON images(ip_address)`); } catch (_) {}
@@ -150,8 +151,21 @@ function run(sql, params = []) {
 
 // --- Contributors ---
 
-function createContributor(id, userAgent) {
-  run(`INSERT OR IGNORE INTO contributors (id, user_agent) VALUES (?, ?)`, [id, userAgent || null]);
+function createContributor(id, name, userAgent) {
+  // Support both createContributor(id, name, userAgent) and legacy createContributor(id, userAgent)
+  let actualName = name;
+  let actualUserAgent = userAgent;
+  if (arguments.length === 2 && typeof name === 'string' && (name.includes('Mozilla') || name.includes('curl') || name.includes('node') || name.length > 50)) {
+    // Legacy call where 2nd argument was userAgent
+    actualUserAgent = name;
+    actualName = null;
+  }
+  run(`
+    INSERT INTO contributors (id, name, user_agent) VALUES (?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = COALESCE(excluded.name, contributors.name),
+      user_agent = COALESCE(excluded.user_agent, contributors.user_agent)
+  `, [id, actualName || null, actualUserAgent || null]);
 }
 
 function getContributor(id) {
@@ -298,9 +312,10 @@ function getImages({ status, page, limit }) {
 
   const countRow = get(`SELECT COUNT(*) as total FROM images i ${where}`, params);
   const images = all(`
-    SELECT i.*, p.text as prompt_text, p.category as prompt_category
+    SELECT i.*, p.text as prompt_text, p.category as prompt_category, c.name as contributor_name
     FROM images i
     LEFT JOIN prompts p ON i.prompt_id = p.id
+    LEFT JOIN contributors c ON i.contributor_id = c.id
     ${where}
     ORDER BY i.created_at DESC
     LIMIT ? OFFSET ?
@@ -316,9 +331,10 @@ function getImages({ status, page, limit }) {
 
 function getImage(id) {
   return get(`
-    SELECT i.*, p.text as prompt_text, p.category as prompt_category
+    SELECT i.*, p.text as prompt_text, p.category as prompt_category, c.name as contributor_name
     FROM images i
     LEFT JOIN prompts p ON i.prompt_id = p.id
+    LEFT JOIN contributors c ON i.contributor_id = c.id
     WHERE i.id = ?
   `, [id]);
 }
@@ -332,7 +348,14 @@ function setDriveFileId(id, driveFileId) {
 }
 
 function getApprovedUnsynced() {
-  return all(`SELECT * FROM images WHERE status = 'approved' AND drive_file_id IS NULL ORDER BY created_at ASC`);
+  return all(`
+    SELECT i.*, p.text as prompt_text, p.category as prompt_category, c.name as contributor_name
+    FROM images i
+    LEFT JOIN prompts p ON i.prompt_id = p.id
+    LEFT JOIN contributors c ON i.contributor_id = c.id
+    WHERE i.status = 'approved' AND i.drive_file_id IS NULL
+    ORDER BY i.created_at ASC
+  `);
 }
 
 function getStats() {
@@ -352,10 +375,11 @@ function getContributorUploadCount(contributorId) {
 
 function getApprovedForExport() {
   return all(`
-    SELECT i.filename, i.custom_text, i.contributor_id, i.created_at, i.drive_file_id,
+    SELECT i.filename, i.custom_text, i.contributor_id, c.name as contributor_name, i.created_at, i.drive_file_id,
            p.text as prompt_text
     FROM images i
     LEFT JOIN prompts p ON i.prompt_id = p.id
+    LEFT JOIN contributors c ON i.contributor_id = c.id
     WHERE i.status = 'approved'
     ORDER BY i.created_at ASC
   `);

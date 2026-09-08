@@ -207,26 +207,53 @@
 
   // --- Image loading ---
   async function loadPending() {
-    const data = await fetchImages('pending', currentPage.pending);
-    currentImagesMap.pending = data.images || [];
-    renderImageGrid(pendingGrid, pendingEmpty, currentImagesMap.pending, 'pending');
-    renderPagination(pendingPagination, data, 'pending');
-    updateBulkBar('pending');
+    try {
+      const data = await fetchImages('pending', currentPage.pending);
+      currentImagesMap.pending = data.images || [];
+      renderImageGrid(pendingGrid, pendingEmpty, currentImagesMap.pending, 'pending');
+      renderPagination(pendingPagination, data, 'pending');
+      updateBulkBar('pending');
+    } catch (err) {
+      showGridError(pendingGrid, pendingEmpty, err);
+    }
   }
 
   async function loadAll() {
-    const status = filterStatus.value;
-    const data = await fetchImages(status, currentPage.all);
-    currentImagesMap.all = data.images || [];
-    renderImageGrid(allGrid, allEmpty, currentImagesMap.all, 'all');
-    renderPagination(allPagination, data, 'all');
-    updateBulkBar('all');
+    try {
+      const status = filterStatus.value;
+      const data = await fetchImages(status, currentPage.all);
+      currentImagesMap.all = data.images || [];
+      renderImageGrid(allGrid, allEmpty, currentImagesMap.all, 'all');
+      renderPagination(allPagination, data, 'all');
+      updateBulkBar('all');
+    } catch (err) {
+      showGridError(allGrid, allEmpty, err);
+    }
+  }
+
+  // A thrown render/fetch error used to leave a blank grid that looked exactly like
+  // "no images". Show it instead, so a broken panel is never mistaken for an empty one.
+  function showGridError(grid, empty, err) {
+    console.error('Error loading images:', err);
+    if (empty) empty.style.display = 'none';
+    if (grid) {
+      grid.innerHTML = `<div class="grid-error">خطا در بارگذاری تصاویر: ${escapeHtml(err && err.message)}</div>`;
+    }
   }
 
   async function fetchImages(status, page) {
     const params = new URLSearchParams({ page, limit: 20 });
     if (status) params.set('status', status);
     const res = await fetch(`/api/admin/images?${params}`);
+    if (res.status === 401) {
+      // Session expired: send the admin back to the login form rather than
+      // rendering an empty gallery that looks like there is nothing to review.
+      loginSection.style.display = 'block';
+      dashboardSection.style.display = 'none';
+      btnLogout.style.display = 'none';
+      throw new Error('نشست شما منقضی شده است. لطفاً دوباره وارد شوید.');
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }
 
@@ -240,19 +267,20 @@
     const selectedSet = tab === 'pending' ? selectedPending : selectedAll;
 
     grid.innerHTML = images.map(img => {
-      const folder = img.status === 'approved' ? 'approved' : 'pending';
-      const cId = escapeHtml((img.contributor_id || '').substring(0, 8));
+      const authorName = escapeHtml(img.contributor_name || 'ثبت نشده');
+      const authorId = escapeHtml(img.contributor_id || '');
       const isSelected = selectedSet.has(img.id);
       return `
       <div class="image-card ${isSelected ? 'selected' : ''}" data-id="${img.id}">
         <div class="card-select-wrap" onclick="event.stopPropagation()">
           <input type="checkbox" class="card-select" data-id="${img.id}" ${isSelected ? 'checked' : ''}>
         </div>
-        <img src="/uploads/${folder}/${encodeURIComponent(img.filename)}" alt="" loading="lazy">
+        <img src="${imageUrl(img)}" alt="" loading="lazy" onerror="imgFallback(this)">
         <div class="image-card-info">
           <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
           <div class="meta">
-            <div>مشارکت‌کننده: ${cId}...</div>
+            <div>نویسنده: <strong style="color:var(--gray-900);">${authorName}</strong></div>
+            <div style="font-size:0.75rem; color:var(--gray-500); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="شناسه: ${authorId}">شناسه: ${authorId}</div>
             <div>${formatDate(img.created_at)}</div>
           </div>
           <span class="status-badge ${escapeHtml(img.status)}">${statusLabel(img.status)}</span>
@@ -387,6 +415,9 @@
     container.querySelectorAll('button[data-page]').forEach(btn => {
       btn.addEventListener('click', () => {
         currentPage[tab] = parseInt(btn.dataset.page);
+        // Drop the selection: it refers to cards leaving the screen, and a bulk
+        // action would otherwise silently apply to images the admin can't see.
+        (tab === 'pending' ? selectedPending : selectedAll).clear();
         if (tab === 'pending') loadPending();
         else loadAll();
       });
@@ -401,16 +432,17 @@
       const img = await res.json();
       if (!img) return;
 
-      const folder = img.status === 'approved' ? 'approved' : 'pending';
-
       modalTitle.textContent = `تصویر #${img.id}`;
-      modalImg.src = `/uploads/${folder}/${img.filename}`;
+      modalImg.onerror = () => window.imgFallback(modalImg);
+      delete modalImg.dataset.fallbackTried;
+      modalImg.src = imageUrl(img);
 
       modalInfo.innerHTML = `
         <p><strong>متن:</strong> ${escapeHtml(img.prompt_text || img.custom_text || '—')}</p>
         <p><strong>دسته:</strong> ${escapeHtml(img.prompt_category || '—')}</p>
-        <p><strong>مشارکت‌کننده:</strong> ${escapeHtml(img.contributor_id || '')}</p>
-        <p><strong>تاریخ:</strong> ${escapeHtml(formatDate(img.created_at))}</p>
+        <p><strong>نام و نام خانوادگی نویسنده:</strong> <strong style="color:var(--primary);">${escapeHtml(img.contributor_name || 'ثبت نشده')}</strong></p>
+        <p><strong>شناسه نویسنده (ID):</strong> <code>${escapeHtml(img.contributor_id || '—')}</code></p>
+        <p><strong>تاریخ ارسال:</strong> ${escapeHtml(formatDate(img.created_at))}</p>
         <p><strong>وضعیت:</strong> <span class="status-badge ${escapeHtml(img.status)}">${statusLabel(img.status)}</span></p>
         ${img.rejection_reason ? `<p><strong>دلیل رد:</strong> ${escapeHtml(img.rejection_reason)}</p>` : ''}
         ${img.drive_file_id ? `<p><strong>Drive ID:</strong> ${escapeHtml(img.drive_file_id)}</p>` : ''}
@@ -713,11 +745,11 @@
       syncEmpty.style.display = 'none';
       syncGrid.innerHTML = unsynced.map(img => `
         <div class="image-card" data-id="${img.id}">
-          <img src="/uploads/approved/${img.filename}" alt="" loading="lazy">
+          <img src="${imageUrl(img)}" alt="" loading="lazy" onerror="imgFallback(this)">
           <div class="image-card-info">
             <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
             <div class="meta">
-              <div>مشارکت‌کننده: ${escapeHtml((img.contributor_id || '').substring(0, 8))}...</div>
+              <div>نویسنده: <strong>${escapeHtml(img.contributor_name || 'ثبت نشده')}</strong> <span style="font-size:0.75rem; color:var(--gray-500);">(${escapeHtml(img.contributor_id || '')})</span></div>
               <div>${formatDate(img.created_at)}</div>
             </div>
             <button class="btn btn-sm btn-primary" style="margin-top:8px;" onclick="event.stopPropagation(); syncSingle(${img.id})">همگام‌سازی</button>
@@ -754,10 +786,39 @@
   // --- Filters ---
   filterStatus.addEventListener('change', () => {
     currentPage.all = 1;
+    selectedAll.clear();
     loadAll();
   });
 
   // --- Helpers ---
+
+  // Build the URL for an image, given that approved files live in uploads/approved
+  // and pending/rejected ones in uploads/pending.
+  function imageUrl(img) {
+    const folder = img.status === 'approved' ? 'approved' : 'pending';
+    return `/uploads/${folder}/${encodeURIComponent(img.filename)}`;
+  }
+
+  // A status change moves the file between folders; if that move ever failed the DB
+  // and disk disagree. Retry once against the other folder before showing a broken
+  // image, so review is never blocked by drift.
+  window.imgFallback = function(el) {
+    if (!el.dataset.fallbackTried) {
+      el.dataset.fallbackTried = '1';
+      el.src = el.src.includes('/uploads/approved/')
+        ? el.src.replace('/uploads/approved/', '/uploads/pending/')
+        : el.src.replace('/uploads/pending/', '/uploads/approved/');
+      return;
+    }
+    // Not in either folder: the row outlived its file. Label it, so an orphaned
+    // record is obvious instead of showing an unexplained broken-image icon.
+    if (el.dataset.missingShown) return;
+    el.dataset.missingShown = '1';
+    el.removeAttribute('src');
+    el.classList.add('img-missing');
+    el.insertAdjacentHTML('afterend', '<div class="img-missing-note">فایل تصویر روی سرور یافت نشد</div>');
+  };
+
   function escapeHtml(s) {
     if (s === null || s === undefined) return '';
     return String(s)

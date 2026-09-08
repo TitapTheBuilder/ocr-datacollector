@@ -26,20 +26,31 @@ function getClientIp(req) {
 }
 
 // --- Contributor HMAC Token Authentication (Closes Finding H1) ---
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CONTRIBUTOR_ID_REGEX = /^[a-zA-Z0-9_\-\u0600-\u06FF]{2,100}$/;
+const UUID_REGEX = CONTRIBUTOR_ID_REGEX;
 
 function generateContributorToken(contributorId, secret = config.CONTRIBUTOR_SECRET) {
-  if (!contributorId || !UUID_REGEX.test(contributorId)) {
-    throw new Error('Invalid contributor UUID for token generation');
+  if (!contributorId || !CONTRIBUTOR_ID_REGEX.test(contributorId)) {
+    throw new Error('Invalid contributor ID for token generation');
   }
   const sig = crypto.createHmac('sha256', secret).update(contributorId).digest('hex');
-  return `${contributorId}.${sig}`;
+  return `${encodeURIComponent(contributorId)}.${sig}`;
 }
 
 function verifyContributorToken(token, secret = config.CONTRIBUTOR_SECRET) {
   if (!token || typeof token !== 'string' || !token.includes('.')) return null;
-  const [id, sig] = token.split('.');
-  if (!id || !sig || !UUID_REGEX.test(id)) return null;
+  const lastDot = token.lastIndexOf('.');
+  const rawId = token.substring(0, lastDot);
+  const sig = token.substring(lastDot + 1);
+
+  let id;
+  try {
+    id = decodeURIComponent(rawId);
+  } catch {
+    id = rawId;
+  }
+
+  if (!id || !sig || !CONTRIBUTOR_ID_REGEX.test(id)) return null;
 
   try {
     const expectedSig = crypto.createHmac('sha256', secret).update(id).digest('hex');
@@ -138,18 +149,18 @@ class MemoryRateLimiter {
   }
 }
 
-// Global API rate limiter (60 req / min per IP)
+// Global API rate limiter (150 req / min per IP)
 const globalApiLimiter = new MemoryRateLimiter({
   windowMs: 60 * 1000,
-  max: 60,
+  max: 150,
   message: 'سرعت ارسال درخواست‌ها بیش از حد مجاز است. لطفاً چند لحظه صبر کنید.',
 });
 
-// Upload burst limiter (max 5 uploads per minute per IP)
+// Upload burst limiter (max 20 uploads per minute per IP)
 const uploadMinuteLimiter = new MemoryRateLimiter({
   windowMs: 60 * 1000,
-  max: config.MAX_UPLOADS_PER_IP_PER_MINUTE || 5,
-  message: 'تعداد آپلودهای ارسالی در دقیقه بیش از حد مجاز است (حداکثر ۵ در دقیقه). لطفاً کمی صبر کنید.',
+  max: config.MAX_UPLOADS_PER_IP_PER_MINUTE || 20,
+  message: 'تعداد آپلودهای ارسالی در دقیقه بیش از حد مجاز است (حداکثر ۲۰ در دقیقه). لطفاً کمی صبر کنید.',
 });
 
 // Admin login rate limiter (max 5 failed attempts in 15 mins per IP)
@@ -339,6 +350,7 @@ function startAutoPurgeWorker(db) {
 }
 
 module.exports = {
+  CONTRIBUTOR_ID_REGEX,
   UUID_REGEX,
   sanitizeIp,
   getClientIp,

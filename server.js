@@ -24,7 +24,9 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'");
+  // style-src/font-src allow fonts.googleapis.com + fonts.gstatic.com so the
+  // Vazirmatn Persian webfont imported by css/style.css actually loads.
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; form-action 'self'");
   next();
 });
 
@@ -137,6 +139,15 @@ function destroySession(token) {
   if (token) sessions.delete(token);
 }
 
+// Expired sessions are otherwise only dropped when that exact token is presented
+// again, so abandoned ones accumulate for the life of the process.
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of sessions.entries()) {
+    if (now - session.createdAt > config.SESSION_EXPIRY_MS) sessions.delete(token);
+  }
+}, 60 * 60 * 1000).unref();
+
 function isAdmin(req) {
   const token = req.cookies?.admin_session;
   if (!token || typeof token !== 'string' || !sessions.has(token)) return false;
@@ -232,13 +243,39 @@ function identifyContributor(req, res, next) {
   next();
 }
 
-// 1. Issue server-side HMAC identity (Closes Finding H1)
+function formatContributorId(name) {
+  if (!name || typeof name !== 'string') return '';
+  let clean = name.trim().replace(/[\u200c\u200b\u200e\u200f\uFEFF]/g, ' ');
+  clean = clean
+    .replace(/[\u064A\u0649]/g, 'ی')
+    .replace(/\u0643/g, 'ک')
+    .replace(/\u0629/g, 'ه');
+  clean = clean.replace(/\s+/g, '_');
+  clean = clean.replace(/[^a-zA-Z0-9_\-\u0600-\u06FF]/g, '');
+  // Lowercase at issuance: verifyContributorToken() returns a lowercased id, so an
+  // id kept in mixed case would never match its own token (Ali_Rezaei vs ali_rezaei).
+  return clean.substring(0, 60).toLowerCase();
+}
+
+// 1. Issue server-side HMAC identity (supports First & Last Name, closes Finding H1)
 app.post('/api/contributors/register', contributorLimiter.middleware(), (req, res) => {
   try {
-    const id = crypto.randomUUID();
+    const rawName = req.body?.name;
+    let cleanName = null;
+    let id = null;
+
+    if (rawName && typeof rawName === 'string' && rawName.trim().length >= 2) {
+      cleanName = rawName.trim().replace(/\s+/g, ' ');
+      id = formatContributorId(cleanName);
+    }
+
+    if (!id || id.length < 2) {
+      id = crypto.randomUUID();
+    }
+
     const token = security.generateContributorToken(id);
-    db.createContributor(id, req.headers['user-agent']);
-    res.json({ success: true, contributor_id: id, token });
+    db.createContributor(id, cleanName, req.headers['user-agent']);
+    res.json({ success: true, contributor_id: id, name: cleanName, token });
   } catch (err) {
     console.error('[API] POST /api/contributors/register:', err.message);
     res.status(500).json({ success: false, error: 'خطای سرور' });
@@ -250,7 +287,7 @@ app.get('/api/register', contributorLimiter.middleware(), (req, res) => {
   try {
     const id = crypto.randomUUID();
     const token = security.generateContributorToken(id);
-    db.createContributor(id, req.headers['user-agent']);
+    db.createContributor(id, null, req.headers['user-agent']);
     res.json({ success: true, contributor_id: id, token });
   } catch (err) {
     console.error('[API] GET /api/register:', err.message);
@@ -261,17 +298,20 @@ app.get('/api/register', contributorLimiter.middleware(), (req, res) => {
 // Backward compatibility: POST /api/contributors
 app.post('/api/contributors', contributorLimiter.middleware(), (req, res) => {
   try {
-    const { id } = req.body || {};
-    if (!id || typeof id !== 'string' || !security.UUID_REGEX.test(id.trim())) {
-      const newId = crypto.randomUUID();
-      const token = security.generateContributorToken(newId);
-      db.createContributor(newId, req.headers['user-agent']);
-      return res.json({ success: true, id: newId, token });
+    const { id, name } = req.body || {};
+    let finalId = id;
+    let cleanName = name && typeof name === 'string' ? name.trim().replace(/\s+/g, ' ') : null;
+
+    if (cleanName && cleanName.length >= 2) {
+      finalId = formatContributorId(cleanName);
+    } else if (!finalId || typeof finalId !== 'string' || !security.CONTRIBUTOR_ID_REGEX.test(finalId.trim())) {
+      finalId = crypto.randomUUID();
     }
-    const cleanId = id.trim().toLowerCase();
+
+    const cleanId = finalId.trim().toLowerCase();
     const token = security.generateContributorToken(cleanId);
-    db.createContributor(cleanId, req.headers['user-agent']);
-    res.json({ success: true, id: cleanId, token });
+    db.createContributor(cleanId, cleanName, req.headers['user-agent']);
+    res.json({ success: true, id: cleanId, contributor_id: cleanId, name: cleanName, token });
   } catch (err) {
     console.error('[API] POST /api/contributors:', err.message);
     res.status(500).json({ success: false, error: 'خطای سرور' });
@@ -299,10 +339,10 @@ function preUploadSecurityCheck(req, res, next) {
 
   // Check IP hourly upload count directly from database
   const ipHourlyCount = db.countIpUploadsLastHour(clientIp);
-  if (ipHourlyCount >= (config.MAX_UPLOADS_PER_IP_PER_HOUR || 20)) {
+  if (ipHourlyCount >= (config.MAX_UPLOADS_PER_IP_PER_HOUR || 100)) {
     return res.status(429).json({
       success: false,
-      error: `سقف آپلود ساعتی برای آدرس شما (${config.MAX_UPLOADS_PER_IP_PER_HOUR || 20} تصویر در ساعت) به پایان رسیده است. لطفاً بعداً تلاش کنید.`,
+      error: `سقف آپلود ساعتی برای آدرس شما (${config.MAX_UPLOADS_PER_IP_PER_HOUR || 100} تصویر در ساعت) به پایان رسیده است. لطفاً بعداً تلاش کنید.`,
     });
   }
 
@@ -461,7 +501,8 @@ app.post(
       }
 
       // Ensure contributor exists in database
-      db.createContributor(verifiedContributorId, req.headers['user-agent']);
+      const contributorName = req.body?.contributor_name ? String(req.body.contributor_name).trim() : null;
+      db.createContributor(verifiedContributorId, contributorName, req.headers['user-agent']);
 
       const fileSize = cleanBuffer.length;
       const result = db.createImage({
@@ -490,11 +531,14 @@ app.post(
 // Contributor upload count (Protected: only authenticated contributor can see own count, closes L5)
 app.get('/api/contributors/:id/count', requireContributor, (req, res) => {
   try {
-    if (req.params.id !== req.contributorId) {
+    // Compare case-insensitively: tokens issued before ids were lowercased at the
+    // source still carry a mixed-case id in the client's localStorage.
+    if (String(req.params.id).toLowerCase() !== req.contributorId) {
       return res.status(403).json({ success: false, error: 'دسترسی غیرمجاز به اطلاعات سایر کاربران.' });
     }
-    const count = db.getContributorUploadCount(req.params.id);
-    res.json({ count });
+    const count = db.getContributorUploadCount(req.contributorId);
+    const contributor = db.getContributor(req.contributorId);
+    res.json({ count, name: contributor ? contributor.name : null });
   } catch (err) {
     console.error('[API] GET /api/contributors/:id/count:', err.message);
     res.status(500).json({ success: false, error: 'خطای سرور' });
@@ -530,7 +574,10 @@ app.post('/api/admin/login', async (req, res) => {
     if (username === config.ADMIN_USERNAME && verifyPassword(password, config.ADMIN_PASSWORD_HASH)) {
       security.loginAttemptLimiter.reset(clientIp);
       const token = createSession();
-      res.setHeader('Set-Cookie', `admin_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${config.SESSION_EXPIRY_MS / 1000}`);
+      // Secure only when actually served over TLS, so localhost dev over http still works.
+      const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+      const secureFlag = isHttps ? ' Secure;' : '';
+      res.setHeader('Set-Cookie', `admin_session=${token}; HttpOnly;${secureFlag} SameSite=Strict; Path=/; Max-Age=${config.SESSION_EXPIRY_MS / 1000}`);
       return res.json({ success: true });
     }
 
@@ -884,10 +931,11 @@ app.delete('/api/admin/prompts/:id', requireAdmin, (req, res) => {
 app.get('/api/admin/export', requireAdmin, (req, res) => {
   try {
     const images = db.getApprovedForExport();
-    let csv = 'filename,text_label,contributor_id,created_at,drive_file_id\n';
+    let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
     for (const img of images) {
       const text = (img.prompt_text || img.custom_text || '').replace(/"/g, '""');
-      csv += `"${img.filename}","${text}","${img.contributor_id}","${img.created_at}","${img.drive_file_id || ''}"\n`;
+      const name = (img.contributor_name || '').replace(/"/g, '""');
+      csv += `"${img.filename}","${text}","${name}","${img.contributor_id}","${img.created_at}","${img.drive_file_id || ''}"\n`;
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename=ocr_labels.csv');
@@ -938,17 +986,34 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
 
     archive.pipe(res);
 
-    // 1. Generate labels.csv manifest with BOM
-    let csv = 'filename,text_label,contributor_id,created_at,drive_file_id\n';
+    // Resolve each record to a file on disk FIRST. A row whose file is missing must
+    // not reach labels.csv, otherwise the manifest points at images the ZIP does not
+    // contain and any loader reading it fails on the missing path.
+    const resolved = [];
     for (const img of images) {
+      let filePath = path.join(config.APPROVED_DIR, img.filename);
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(config.PENDING_DIR, img.filename);
+      }
+      if (fs.existsSync(filePath)) {
+        resolved.push({ img, filePath });
+      } else {
+        console.warn(`[API] export-zip: skipping ${img.filename} (file not found on disk)`);
+      }
+    }
+
+    // 1. Generate labels.csv manifest with BOM
+    let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
+    for (const { img } of resolved) {
       const text = (img.prompt_text || img.custom_text || '').replace(/"/g, '""');
-      csv += `"${img.filename}","${text}","${img.contributor_id}","${img.created_at}","${img.drive_file_id || ''}"\n`;
+      const name = (img.contributor_name || '').replace(/"/g, '""');
+      csv += `"${img.filename}","${text}","${name}","${img.contributor_id}","${img.created_at}","${img.drive_file_id || ''}"\n`;
     }
     archive.append('\uFEFF' + csv, { name: 'labels.csv' });
 
     // 2. Generate README.txt
     const readme = `دیتاست OCR دستنویس فارسی
-مجموع تصاویر تایید شده: ${images.length}
+مجموع تصاویر تایید شده: ${resolved.length}
 تاریخ دریافت خروجی: ${new Date().toLocaleString('fa-IR')}
 
 محتوای فایل زیپ:
@@ -957,15 +1022,9 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
 `;
     archive.append(readme, { name: 'README.txt' });
 
-    // 3. Append images
-    for (const img of images) {
-      let filePath = path.join(config.APPROVED_DIR, img.filename);
-      if (!fs.existsSync(filePath)) {
-        filePath = path.join(config.PENDING_DIR, img.filename);
-      }
-      if (fs.existsSync(filePath)) {
-        archive.file(filePath, { name: `images/${img.filename}` });
-      }
+    // 3. Append images (exactly the rows written to labels.csv)
+    for (const { img, filePath } of resolved) {
+      archive.file(filePath, { name: `images/${img.filename}` });
     }
 
     await archive.finalize();
