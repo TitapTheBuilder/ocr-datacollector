@@ -72,6 +72,8 @@ async function initDatabase() {
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_contributor ON images(contributor_id)`);
+  // getRandomPrompt LEFT JOINs images by prompt_id on every request.
+  db.run(`CREATE INDEX IF NOT EXISTS idx_images_prompt ON images(prompt_id)`);
 
   // Migrate columns for security: ip_address and file_hash
   try { db.run(`ALTER TABLE images ADD COLUMN ip_address TEXT`); } catch (_) {}
@@ -163,23 +165,50 @@ function countContributorUploadsLastHour(id) {
 
 // --- Prompts ---
 
+// Serve the LEAST-COLLECTED prompt, not a uniformly random one.
+//
+// Why: with a designed prompt list (every word above a coverage floor, every
+// confusion pair forced in), the value of the collection is that each line gets
+// written. Uniform random draws are coupon-collector: at N uploads over N
+// prompts roughly 37% of prompts are never written at all, while others are
+// written three or four times. Ordering by how many images a prompt already has
+// turns that into near-perfect one-each coverage.
+//
+// This also replaces any need to assign each volunteer a fixed block of 20.
+// Block assignment loses a volunteer's whole remainder when they stop after
+// five; least-collected simply hands those lines to whoever comes next.
+//
+// Rejected images do NOT count as collected, so a rejected prompt returns to
+// the front of the queue. Pending ones DO count, so five people online at once
+// are not all sent the same line while it waits for review.
+//
+// The contributor's own last 5 are still excluded, so nobody is asked to write
+// the same line twice in a row. If that exclusion empties the pool (a tiny
+// prompt list), the fallback drops it rather than returning nothing.
 function getRandomPrompt(contributorId) {
   let recentIds = [];
   if (contributorId) {
     recentIds = all(`SELECT prompt_id FROM images WHERE contributor_id = ? AND prompt_id IS NOT NULL ORDER BY created_at DESC LIMIT 5`, [contributorId]).map(r => r.prompt_id);
   }
 
-  let prompt;
-  if (recentIds.length > 0) {
-    const placeholders = recentIds.map(() => '?').join(',');
-    prompt = get(`SELECT * FROM prompts WHERE active = 1 AND id NOT IN (${placeholders}) ORDER BY RANDOM() LIMIT 1`, recentIds);
-  }
+  // RANDOM() breaks ties, so concurrent users on an all-zero pool get
+  // different lines instead of colliding on the lowest id.
+  const leastCollected = (excludeIds) => {
+    const exclude = excludeIds.length
+      ? `AND p.id NOT IN (${excludeIds.map(() => '?').join(',')})`
+      : '';
+    return get(`
+      SELECT p.*, COUNT(i.id) AS collected
+      FROM prompts p
+      LEFT JOIN images i ON i.prompt_id = p.id AND i.status != 'rejected'
+      WHERE p.active = 1 ${exclude}
+      GROUP BY p.id
+      ORDER BY collected ASC, RANDOM()
+      LIMIT 1
+    `, excludeIds);
+  };
 
-  if (!prompt) {
-    prompt = get(`SELECT * FROM prompts WHERE active = 1 ORDER BY RANDOM() LIMIT 1`);
-  }
-
-  return prompt;
+  return leastCollected(recentIds) || leastCollected([]);
 }
 
 function getAllPrompts(activeOnly) {
