@@ -1,5 +1,5 @@
-require('dotenv').config();
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // On Railway, set PERSISTENT_DATA_PATH to the volume mount path
 // This keeps DB and uploads across deploys
