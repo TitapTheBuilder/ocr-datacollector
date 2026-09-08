@@ -381,10 +381,13 @@ app.post(
         return res.status(400).json({ success: false, error: 'تعیین یکی از فیلدهای prompt_id یا custom_text الزامی است.' });
       }
 
-      // 4. Validate Binary Magic Bytes (prevent fake files / garbage uploads)
-      const detectedMime = security.validateMagicBytes(req.file.path);
+      // 4. Read file into buffer and validate Binary Magic Bytes (prevent fake files / garbage uploads)
+      const fileBuffer = fs.readFileSync(req.file.path);
+      const detectedMime = security.validateMagicBytes(fileBuffer);
       if (!detectedMime) {
-        fs.unlinkSync(req.file.path);
+        if (fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch (_) {}
+        }
         return res.status(400).json({
           success: false,
           error: 'فایل ارسالی تصویر معتبر نیست یا فرمت آن پشتیبانی نمی‌شود.',
@@ -392,16 +395,40 @@ app.post(
       }
 
       // 5. Re-encode Image with Sharp: Strips tEXt/iTXt chunks, metadata, and polyglots (Closes Finding H5)
+      // Note: Passing Buffer prevents Windows file-locking issues (EBUSY / UNKNOWN) with libvips.
       let finalMime = detectedMime;
+      let cleanBuffer;
       try {
-        const cleanBuffer = await sharp(req.file.path)
-          .rotate()
-          .png({ compressionLevel: 8 })
-          .toBuffer();
+        const sharpInstance = sharp(fileBuffer).rotate();
+        if (detectedMime === 'image/jpeg') {
+          cleanBuffer = await sharpInstance.jpeg({ quality: 90 }).toBuffer();
+          finalMime = 'image/jpeg';
+        } else if (detectedMime === 'image/webp') {
+          cleanBuffer = await sharpInstance.webp({ quality: 90 }).toBuffer();
+          finalMime = 'image/webp';
+        } else {
+          cleanBuffer = await sharpInstance.png({ compressionLevel: 8 }).toBuffer();
+          finalMime = 'image/png';
+        }
+
+        // Ensure file extension on disk matches the validated MIME type
+        const targetExt = detectedMime === 'image/png' ? '.png' : detectedMime === 'image/webp' ? '.webp' : '.jpg';
+        const currentExt = path.extname(req.file.filename).toLowerCase();
+        if (currentExt !== targetExt) {
+          const oldPath = req.file.path;
+          req.file.filename = req.file.filename.replace(/\.[^/.]+$/, '') + targetExt;
+          req.file.path = path.join(path.dirname(oldPath), req.file.filename);
+          if (fs.existsSync(oldPath)) {
+            try { fs.unlinkSync(oldPath); } catch (_) {}
+          }
+        }
+
         fs.writeFileSync(req.file.path, cleanBuffer);
-        finalMime = 'image/png';
       } catch (sharpErr) {
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        console.error('[API] Sharp processing error:', sharpErr.message);
+        if (fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch (_) {}
+        }
         return res.status(400).json({
           success: false,
           error: 'تصویر ارسالی قابل پردازش نیست یا محتوای آن آسیب دیده است.',
@@ -409,10 +436,12 @@ app.post(
       }
 
       // 6. Compute File Hash and prevent duplicates (SHA-256 Deduplication)
-      const fileHash = await security.computeFileHash(req.file.path);
+      const fileHash = await security.computeFileHash(cleanBuffer);
       const duplicate = db.findByFileHash(fileHash);
       if (duplicate) {
-        fs.unlinkSync(req.file.path);
+        if (fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch (_) {}
+        }
         return res.status(409).json({
           success: false,
           error: 'این تصویر قبلاً در سامانه ثبت شده است. لطفاً تصویر جدیدی ارسال کنید.',
@@ -422,7 +451,9 @@ app.post(
       // 7. Rate limit check for contributor ID
       const uploadCount = db.countContributorUploadsLastHour(verifiedContributorId);
       if (uploadCount >= config.MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR) {
-        fs.unlinkSync(req.file.path);
+        if (fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch (_) {}
+        }
         return res.status(429).json({
           success: false,
           error: 'تعداد آپلودهای شما در ساعت گذشته بیش از حد مجاز است. لطفاً بعداً تلاش کنید.',
@@ -432,7 +463,7 @@ app.post(
       // Ensure contributor exists in database
       db.createContributor(verifiedContributorId, req.headers['user-agent']);
 
-      const fileSize = fs.statSync(req.file.path).size;
+      const fileSize = cleanBuffer.length;
       const result = db.createImage({
         filename: req.file.filename,
         originalName: req.file.originalname,
