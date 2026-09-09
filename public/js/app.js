@@ -59,7 +59,8 @@
   const editorMeta = document.getElementById('editorMeta');
   const btnRotateLeft = document.getElementById('btnRotateLeft');
   const btnRotateRight = document.getElementById('btnRotateRight');
-  const btnResetCrop = document.getElementById('btnResetCrop');
+  const btnApplyCrop = document.getElementById('btnApplyCrop');
+  const btnRestoreOriginal = document.getElementById('btnRestoreOriginal');
 
   const completionCard = document.getElementById('completionCard');
   const btnNewSet = document.getElementById('btnNewSet');
@@ -362,32 +363,48 @@
   const MAX_OUTPUT = 2400; // longest edge of the submitted image
 
   const editor = {
-    image: null,
-    rotation: 0,
-    base: null,
-    baseCtx: null,
-    crop: null,       // {x, y, w, h} in base pixels, or null for "whole image"
+    image: null,      // the file exactly as the volunteer picked it, for "restore"
+    source: null,     // canvas: the image as committed so far (crops baked in)
+    rotation: 0,      // rotation applied on top of `source`
+    base: null,       // canvas: `source` rotated — this is what is drawn and exported
+    crop: null,       // pending selection in base pixels, or null for "whole image"
+    cropped: false,
     scale: 1,
     drag: null,
   };
 
   function resetEditor() {
     editor.image = null;
+    editor.source = null;
     editor.rotation = 0;
     editor.base = null;
     editor.crop = null;
+    editor.cropped = false;
     editor.drag = null;
     editorContainer.classList.remove('active');
     if (cameraInput) cameraInput.value = '';
     if (fileInput) fileInput.value = '';
   }
 
+  // Copy a drawable into a fresh canvas. Everything downstream works on canvases so
+  // that an applied crop can replace the source in place.
+  function toCanvas(drawable, width, height) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(drawable, 0, 0);
+    return canvas;
+  }
+
   function buildBase() {
-    const img = editor.image;
-    if (!img) return;
+    const src = editor.source;
+    if (!src) return;
     const swap = editor.rotation === 90 || editor.rotation === 270;
-    const w = swap ? img.naturalHeight : img.naturalWidth;
-    const h = swap ? img.naturalWidth : img.naturalHeight;
+    const w = swap ? src.height : src.width;
+    const h = swap ? src.width : src.height;
 
     const canvas = document.createElement('canvas');
     canvas.width = w;
@@ -397,10 +414,10 @@
     ctx.fillRect(0, 0, w, h);
     ctx.translate(w / 2, h / 2);
     ctx.rotate((editor.rotation * Math.PI) / 180);
-    ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+    ctx.drawImage(src, -src.width / 2, -src.height / 2);
 
     editor.base = canvas;
-    editor.baseCtx = ctx;
+    // Rotating invalidates the selection: its coordinates belong to the old frame.
     editor.crop = null;
   }
 
@@ -463,9 +480,26 @@
     }
 
     const c = cropOrFull();
+    let note;
+    if (editor.crop) {
+      note = ' — کادر انتخاب شد؛ دکمه «برش تصویر» را بزنید';
+    } else if (editor.cropped) {
+      note = ' — ✅ تصویر بریده شد';
+    } else {
+      note = ' — بدون برش (کل تصویر)';
+    }
     editorMeta.textContent = `اندازه خروجی: ${fa(Math.round(c.w))} × ${fa(Math.round(c.h))} پیکسل`
       + (editor.rotation ? ` — چرخش: ${fa(editor.rotation)}°` : '')
-      + (editor.crop ? '' : ' — بدون برش (کل تصویر)');
+      + note;
+
+    updateEditorButtons();
+  }
+
+  function updateEditorButtons() {
+    if (btnApplyCrop) btnApplyCrop.disabled = !editor.crop;
+    if (btnRestoreOriginal) {
+      btnRestoreOriginal.disabled = !editor.image || (!editor.cropped && editor.rotation === 0 && !editor.crop);
+    }
   }
 
   function handlePoints(x, y, w, h) {
@@ -597,7 +631,7 @@
   editorCanvas.addEventListener('pointercancel', endDrag);
 
   function rotate(delta) {
-    if (!editor.image) return;
+    if (!editor.source) return;
     editor.rotation = (editor.rotation + delta + 360) % 360;
     buildBase();
     layoutCanvas();
@@ -606,12 +640,47 @@
 
   if (btnRotateLeft) btnRotateLeft.addEventListener('click', () => rotate(-90));
   if (btnRotateRight) btnRotateRight.addEventListener('click', () => rotate(90));
-  if (btnResetCrop) {
-    btnResetCrop.addEventListener('click', () => {
-      editor.crop = null;
-      drawEditor();
-    });
+
+  // Cut the selection out for real, so the volunteer SEES the cropped image rather
+  // than a selection box they have to trust. The result becomes the new source, and
+  // the rotation is baked into those pixels, so a later rotate turns the crop.
+  function applyCrop() {
+    if (!editor.crop || !editor.base) return;
+    const c = editor.crop;
+    const sx = Math.max(0, Math.round(c.x));
+    const sy = Math.max(0, Math.round(c.y));
+    const sw = Math.max(1, Math.min(Math.round(c.w), editor.base.width - sx));
+    const sh = Math.max(1, Math.min(Math.round(c.h), editor.base.height - sy));
+
+    const out = document.createElement('canvas');
+    out.width = sw;
+    out.height = sh;
+    const ctx = out.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, sw, sh);
+    ctx.drawImage(editor.base, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    editor.source = out;
+    editor.rotation = 0;
+    editor.cropped = true;
+    buildBase();
+    layoutCanvas();
+    drawEditor();
+    showStatus('تصویر بریده شد. اگر نتیجه مناسب نیست، «بازگردانی تصویر اصلی» را بزنید.', 'success');
   }
+
+  function restoreOriginal() {
+    if (!editor.image) return;
+    editor.source = toCanvas(editor.image, editor.image.naturalWidth, editor.image.naturalHeight);
+    editor.rotation = 0;
+    editor.cropped = false;
+    buildBase();
+    layoutCanvas();
+    drawEditor();
+  }
+
+  if (btnApplyCrop) btnApplyCrop.addEventListener('click', applyCrop);
+  if (btnRestoreOriginal) btnRestoreOriginal.addEventListener('click', restoreOriginal);
 
   window.addEventListener('resize', () => {
     if (!editor.base) return;
@@ -676,7 +745,9 @@
     img.onload = () => {
       URL.revokeObjectURL(url);
       editor.image = img;
+      editor.source = toCanvas(img, img.naturalWidth, img.naturalHeight);
       editor.rotation = 0;
+      editor.cropped = false;
       buildBase();
       // The container must be visible BEFORE the canvas is sized: layoutCanvas
       // measures its parent, and a display:none parent reports clientWidth 0,

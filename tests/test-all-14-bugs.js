@@ -224,6 +224,21 @@ async function runTests() {
   assert.ok(layoutAt > activateAt, 'layoutCanvas() must run AFTER the container is made visible');
   console.log('  [PASS] Bug 14 verified: Canvas is measured only once the editor is visible.');
 
+  // --- Bug 15: the crop button must actually crop ---
+  // It used to be a no-op-looking 'clear the selection box' button; pressing it with
+  // no box drawn did nothing visible. It now cuts the selection out of the image and
+  // shows the result, so the volunteer can see what they are about to upload.
+  console.log('Testing Bug 15: crop button applies the crop to the visible image...');
+  const indexHtml = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+  assert.ok(indexHtml.includes('id="btnApplyCrop"'), 'index.html must expose an apply-crop button');
+  assert.ok(!indexHtml.includes('id="btnResetCrop"'), 'the old no-op reset-crop button must be gone');
+  assert.ok(appCode.includes('function applyCrop()'), 'app.js must define applyCrop()');
+  const applyBody = appCode.slice(appCode.indexOf('function applyCrop()'), appCode.indexOf('function restoreOriginal()'));
+  assert.ok(applyBody.includes('editor.source = out'), 'applyCrop must replace the working image with the cropped pixels');
+  assert.ok(applyBody.includes('editor.cropped = true'), 'applyCrop must record that a crop was applied');
+  assert.ok(appCode.includes('function restoreOriginal()'), 'app.js must offer a way back to the original image');
+  console.log('  [PASS] Bug 15 verified: Crop button replaces the image with the cropped result.');
+
   console.log('\n=============================================');
   console.log('🎉 ALL 14 CRITICAL & MEDIUM BUGS VERIFIED SUCCESSFULLY!');
   console.log('=============================================\n');

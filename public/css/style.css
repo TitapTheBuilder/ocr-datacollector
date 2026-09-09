@@ -1718,3 +1718,17 @@ body {
 /* `.modal-body img` forces width:100% for the old single-image modal; the line
    thumbnails in the segmentation list must keep their natural aspect instead. */
 .modal-body .seg-line-thumb { width: auto; margin-bottom: 0; object-fit: contain; }
+
+/* The crop/restore buttons are disabled until they have something to act on, and
+   `.btn` carried no disabled styling — without this they look clickable. */
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
+}
+.btn:disabled:hover,
+.btn[disabled]:hover {
+  background: inherit;
+  border-color: inherit;
+}
