@@ -190,10 +190,7 @@
         const data = await res.json();
         alert(`پاک‌سازی فوری انجام شد. ${data.purgedCount || 0} تصویر رد شده از روی دیسک و دیتابیس حذف شدند.`);
         loadStats();
-        const activeTabEl = document.querySelector('.tab-btn.active');
-        const activeTab = activeTabEl ? activeTabEl.dataset.tab : 'pending';
-        if (activeTab === 'pending') loadPending();
-        else if (activeTab === 'all') loadAll();
+        refreshActiveGrid();
         loadStorageStats();
       } catch (err) {
         alert('خطا در پاک‌سازی تصاویر: ' + err.message);
@@ -1148,6 +1145,7 @@
       setSaveState('ذخیره شد ✓', 'saved');
       renderSegList();
       renderModalActions(seg.data.image);
+      updateCachedSegmentCount(seg.data.image.id, data.segmentCount, data.totalLines);
       loadStats();
     } catch (err) {
       setSaveState('خطا در ارتباط با سرور', 'error');
@@ -1173,6 +1171,7 @@
       setSaveState('');
       renderSegList();
       renderModalActions(seg.data.image);
+      updateCachedSegmentCount(seg.data.image.id, data.segmentCount, seg.data.lines.length);
       updateEraseButtons();
       segDraw();
       loadStats();
@@ -1372,6 +1371,7 @@
     flushSegmentSave().finally(() => {
       imageModal.classList.remove('active');
       segReset();
+      refreshActiveGrid();
     });
   }
 
@@ -1856,6 +1856,30 @@
     if (img.sheet_category === 'numbers') return '🔢 برگه اعداد';
     if (img.sheet_category) return '📝 برگه جملات و کلمات';
     return escapeHtml(img.prompt_text || img.custom_text || 'ارسال قدیمی');
+  }
+
+  // The card grid is only refetched on tab switch, pagination and approve/reject.
+  // Segmenting now happens without leaving the modal, so the cached row for the
+  // sheet being worked on has to be updated as crops are saved — otherwise the
+  // "برش سطرها" badge keeps showing whatever it said when the grid last loaded.
+  function updateCachedSegmentCount(imageId, segmentCount, totalLines) {
+    for (const tab of ['pending', 'all']) {
+      for (const img of currentImagesMap[tab] || []) {
+        if (img.id !== imageId) continue;
+        if (typeof segmentCount === 'number') img.segment_count = segmentCount;
+        if (typeof totalLines === 'number') img.line_count = totalLines;
+        const card = document.querySelector(`.image-card[data-id="${imageId}"]`);
+        const badge = card && card.querySelector('.seg-badge');
+        if (badge) badge.outerHTML = segmentBadge(img);
+      }
+    }
+  }
+
+  function refreshActiveGrid() {
+    const activeTabEl = document.querySelector('.tab.active');
+    const activeTab = activeTabEl ? activeTabEl.dataset.tab : 'pending';
+    if (activeTab === 'pending') loadPending();
+    else if (activeTab === 'all') loadAll();
   }
 
   function segmentBadge(img) {

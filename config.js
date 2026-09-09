@@ -16,10 +16,15 @@ module.exports = {
   // pending -> approved file move.
   SEGMENTS_DIR: path.join(DATA_ROOT, 'uploads', 'segments'),
   DB_PATH: path.join(DATA_ROOT, 'data', 'ocr-data.db'),
-  // One sheet now carries 10 handwritten lines, so it needs far more resolution
-  // than the old one-word-per-photo uploads did.
+  // A perfectly flat erased patch has zero grain while real paper does not, which
+  // is exactly the kind of unnamed cue a corpus-identity probe picks up. Fill with
+  // the paper colour PLUS noise matched to the sheet's own grain. Set to 'false'
+  // to go back to a flat fill.
+  SEGMENT_FILL_NOISE: process.env.SEGMENT_FILL_NOISE !== 'false',
   SENTENCES_PER_SHEET: parseInt(process.env.SENTENCES_PER_SHEET) || 10,
   NUMBERS_PER_SHEET: parseInt(process.env.NUMBERS_PER_SHEET) || 10,
+  // One sheet now carries 10 handwritten lines, so it needs far more resolution
+  // than the old one-word-per-photo uploads did.
   MAX_FILE_SIZE_MB: parseInt(process.env.MAX_FILE_SIZE_MB) || 10,
   ALLOWED_MIME_TYPES: ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'],
   SESSION_EXPIRY_MS: 24 * 60 * 60 * 1000,

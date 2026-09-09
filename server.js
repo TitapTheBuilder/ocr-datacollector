@@ -919,18 +919,227 @@ function buildMaskSvg({ box, quad, erase, bgColor }) {
   );
 }
 
-async function renderSegmentCrop({ sheetPath, outPath, box, quad, erase, bgColor }) {
-  let pipeline = sharp(sheetPath).extract({ left: box.x, top: box.y, width: box.w, height: box.h });
-  // Skip compositing entirely when the shape is still a plain rectangle and nothing
-  // was erased — the common case stays a straight extract.
+// The angle of the writing baseline, in degrees, from the quad's two horizontal
+// edges. `dy` is negated to leave image coordinates (y down) for the ordinary y-up
+// convention, so POSITIVE means the line rises to the right. To level a crop,
+// rotate it by -baseline_angle_deg (PIL Image.rotate / cv2.getRotationMatrix2D).
+function baselineAngleDeg(quad) {
+  const [tl, tr, br, bl] = quad;
+  const edge = (a, b) => Math.atan2(-(b[1] - a[1]), b[0] - a[0]);
+  const top = edge(tl, tr);
+  const bottom = edge(bl, br);
+  return ((top + bottom) / 2) * (180 / Math.PI);
+}
+
+// The same angle, measured from the INK of the finished crop instead of the shape.
+//
+// There are two ways an admin can handle a crooked line: drag the corners to follow
+// it, or draw a plain rectangle and erase what leaked in. The second leaves an
+// axis-aligned quad, so baselineAngleDeg() reports 0° for handwriting that is
+// visibly slanted. Measuring the ink recovers the angle either way, so the exported
+// value never depends on which technique was used.
+//
+// Runs on the finished crop, so erased areas are already paper and contribute
+// nothing. Returns null when there is not enough ink to be confident.
+async function measureInkAngleDeg(cropPath) {
+  try {
+    const { data, info } = await sharp(cropPath).greyscale().raw().toBuffer({ resolveWithObject: true });
+    const { width, height } = info;
+    if (width < 20 || height < 8) return null;
+
+    // Contrast-adaptive threshold from the crop's own histogram — a fixed cutoff
+    // would fail on a dim photo or a light pencil.
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < data.length; i++) hist[data[i]]++;
+    const percentile = (p) => {
+      let acc = 0;
+      const want = data.length * p;
+      for (let v = 0; v < 256; v++) {
+        acc += hist[v];
+        if (acc >= want) return v;
+      }
+      return 255;
+    };
+    const paper = percentile(0.90);
+    const darkest = percentile(0.02);
+    if (paper - darkest < 25) return null; // no real ink contrast to fit to
+    const threshold = paper - 0.45 * (paper - darkest);
+
+    // One centroid per column. Centroids beat "lowest ink pixel" for Persian, where
+    // dots and descenders sit well below the body of the line.
+    const xs = [];
+    const ys = [];
+    for (let x = 0; x < width; x++) {
+      let n = 0;
+      let sum = 0;
+      for (let y = 0; y < height; y++) {
+        if (data[y * width + x] < threshold) { n++; sum += y; }
+      }
+      if (n >= 2) { xs.push(x); ys.push(sum / n); }
+    }
+    if (xs.length < 20 || xs[xs.length - 1] - xs[0] < width * 0.3) return null;
+
+    const fit = (idx) => {
+      let sx = 0, sy = 0, sxx = 0, sxy = 0;
+      for (const i of idx) { sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; }
+      const n = idx.length;
+      const denom = n * sxx - sx * sx;
+      if (Math.abs(denom) < 1e-9) return null;
+      const a = (n * sxy - sx * sy) / denom;
+      return { a, b: (sy - a * sx) / n };
+    };
+
+    let idx = xs.map((_, i) => i);
+    let line = fit(idx);
+    if (!line) return null;
+
+    // One trimming pass: drop the worst residuals so a stray speck or a long
+    // descender cannot tilt the fit.
+    const residual = i => Math.abs(ys[i] - (line.a * xs[i] + line.b));
+    const sorted = idx.map(residual).sort((p, q) => p - q);
+    const cutoff = sorted[Math.floor(sorted.length * 0.85)];
+    const kept = idx.filter(i => residual(i) <= cutoff);
+    if (kept.length >= 10) {
+      const refit = fit(kept);
+      if (refit) line = refit;
+    }
+
+    // Negate the slope for the same y-up convention baselineAngleDeg uses.
+    const deg = Math.atan(-line.a) * (180 / Math.PI);
+    if (!Number.isFinite(deg) || Math.abs(deg) > 45) return null;
+    return deg;
+  } catch (err) {
+    console.warn('[Segments] ink angle estimate failed:', err.message);
+    return null;
+  }
+}
+
+// Seeded PRNG, so re-saving a segment with identical geometry reproduces identical
+// noise instead of quietly changing the dataset on every edit.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function hashSeed(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+// The grain of THIS sheet's paper, so a filled patch sits in the same noise floor
+// as the pixels around it. Sampled only from paper-ish pixels — anything far from
+// the paper level is ink and would inflate the estimate wildly.
+function estimatePaperSigma(rgb, pixelCount, bg) {
+  const bgLum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
+  const step = Math.max(1, Math.floor(pixelCount / 20000));
+  let n = 0;
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < pixelCount; i += step) {
+    const o = i * 3;
+    const lum = 0.299 * rgb[o] + 0.587 * rgb[o + 1] + 0.114 * rgb[o + 2];
+    if (Math.abs(lum - bgLum) > 25) continue;
+    n++;
+    sum += lum;
+    sumSq += lum * lum;
+  }
+  if (n < 50) return 0;
+  const mean = sum / n;
+  return Math.min(12, Math.sqrt(Math.max(0, sumSq / n - mean * mean)));
+}
+
+function clamp255(v) {
+  return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+// Cut the crop and paint the excluded areas. Returns the fraction of the crop that
+// ended up synthetic, so the dataset can report how much of each sample is fill.
+async function renderSegmentCrop({ sheetPath, outPath, box, quad, erase, bgColor, seedKey }) {
+  const extract = { left: box.x, top: box.y, width: box.w, height: box.h };
+
+  // The common case — a plain rectangle with nothing erased — stays a straight
+  // extract with no mask work at all.
   const isPlainRect =
     erase.length === 0 &&
     quad[0][0] === quad[3][0] && quad[1][0] === quad[2][0] &&
     quad[0][1] === quad[1][1] && quad[2][1] === quad[3][1];
-  if (!isPlainRect) {
-    pipeline = pipeline.composite([{ input: buildMaskSvg({ box, quad, erase, bgColor }), top: 0, left: 0 }]);
+  if (isPlainRect) {
+    await sharp(sheetPath).extract(extract).jpeg({ quality: 92 }).toFile(outPath);
+    return { maskedFraction: 0 };
   }
-  await pipeline.jpeg({ quality: 92 }).toFile(outPath);
+
+  const maskSvg = buildMaskSvg({ box, quad, erase, bgColor });
+
+  // Render the mask to raw alpha. This is both what gets painted and how the
+  // masked fraction is measured — antialiased edges count as their true coverage.
+  const mask = await sharp(maskSvg).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const pixelCount = box.w * box.h;
+  let coverage = 0;
+  for (let i = 0; i < pixelCount; i++) {
+    coverage += mask.data[i * mask.info.channels + 3] / 255;
+  }
+  const maskedFraction = pixelCount ? coverage / pixelCount : 0;
+
+  const source = await sharp(sheetPath)
+    .extract(extract)
+    .removeAlpha()
+    .toColourspace('srgb')
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Anything other than plain 8-bit RGB (a greyscale or CMYK source that survived
+  // upload) falls back to the flat composite rather than guessing at the layout.
+  if (source.info.channels !== 3 || !config.SEGMENT_FILL_NOISE) {
+    await sharp(sheetPath)
+      .extract(extract)
+      .composite([{ input: maskSvg, top: 0, left: 0 }])
+      .jpeg({ quality: 92 })
+      .toFile(outPath);
+    return { maskedFraction };
+  }
+
+  const bg = [
+    parseInt(bgColor.slice(1, 3), 16),
+    parseInt(bgColor.slice(3, 5), 16),
+    parseInt(bgColor.slice(5, 7), 16),
+  ];
+  const sigma = estimatePaperSigma(source.data, pixelCount, bg);
+  const rand = mulberry32(hashSeed(seedKey || 'segment'));
+
+  for (let i = 0; i < pixelCount; i++) {
+    const alpha = mask.data[i * mask.info.channels + 3] / 255;
+    if (alpha === 0) continue;
+
+    // One grain value for all three channels: paper grain is luminance noise, and
+    // per-channel noise would read as colour speckle that real paper does not have.
+    let grain = 0;
+    if (sigma > 0) {
+      const u = Math.max(1e-9, rand());
+      grain = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rand()) * sigma;
+    }
+    const o = i * 3;
+    for (let c = 0; c < 3; c++) {
+      const fill = clamp255(bg[c] + grain);
+      // Blend rather than overwrite, so the mask's antialiased edge stays soft — a
+      // hard synthetic edge is itself a cue.
+      source.data[o + c] = clamp255(Math.round(source.data[o + c] * (1 - alpha) + fill * alpha));
+    }
+  }
+
+  await sharp(source.data, { raw: { width: box.w, height: box.h, channels: 3 } })
+    .jpeg({ quality: 92 })
+    .toFile(outPath);
+
+  return { maskedFraction };
 }
 
 // The sheet image with its expected lines and any rectangles already drawn.
@@ -1018,7 +1227,15 @@ app.post('/api/admin/images/:id/segments', requireAdmin, async (req, res) => {
 
     const filename = `seg_${image.id}_${String(lineNo).padStart(2, '0')}_${crypto.randomBytes(6).toString('hex')}.jpg`;
     const outPath = path.join(config.SEGMENTS_DIR, filename);
-    await renderSegmentCrop({ sheetPath, outPath, box, quad, erase, bgColor });
+    // Seed the fill noise from the geometry, not the filename, so an unchanged
+    // shape re-renders to the same pixels.
+    const seedKey = `${image.id}|${lineNo}|${JSON.stringify(quad)}|${JSON.stringify(erase)}|${bgColor}`;
+    const { maskedFraction } = await renderSegmentCrop({
+      sheetPath, outPath, box, quad, erase, bgColor, seedKey,
+    });
+
+    // Measured on the crop we just wrote, so erased areas are already paper.
+    const inkAngleDeg = await measureInkAngleDeg(outPath);
 
     const { previousFilename } = db.upsertSegment({
       imageId: image.id,
@@ -1026,7 +1243,7 @@ app.post('/api/admin/images/:id/segments', requireAdmin, async (req, res) => {
       lineNo,
       text: line.text,
       x: box.x, y: box.y, w: box.w, h: box.h,
-      quad, erase, bgColor,
+      quad, erase, bgColor, maskedFraction, inkAngleDeg,
       filename,
     });
 
@@ -1355,6 +1572,16 @@ app.post('/api/admin/github/sync', requireAdmin, async (req, res) => {
 | \`contributor_name\` | نام و نام خانوادگی مشارکت‌کننده |
 | \`contributor_id\` | شناسه نویسنده |
 | \`created_at\` | تاریخ و زمان بارگذاری برگه |
+| \`quad\` | چهار گوشه ناحیه متن: \`x1 y1 x2 y2 x3 y3 x4 y4\` (بالا-چپ، بالا-راست، پایین-راست، پایین-چپ) بر حسب پیکسل تصویر برش‌خورده |
+| \`baseline_angle_deg\` | زاویه خط کرسی؛ مثبت یعنی سطر به راست بالا می‌رود. برای افقی‌سازی، تصویر را به اندازه منفی این عدد بچرخانید |
+| \`angle_source\` | منبع زاویه: \`quad\` (از گوشه‌های کشیده‌شده)، \`ink\` (اندازه‌گیری‌شده از روی نوشته، وقتی مدیر کادر ساده کشیده و با پاک‌کن تمیز کرده)، یا \`none\` |
+| \`masked_fraction\` | نسبت پیکسل‌های کاغذ مصنوعی (بیرون چهارضلعی + نواحی پاک‌شده) به کل برش، بین ۰ و ۱ |
+
+## نکته مهم برای پیش‌پردازش
+برش هر سطر، «کادر محیطی» چهارضلعی آن است. برای سطرهای کج، این کادر بسیار بلندتر از خودِ
+متن است؛ بنابراین تغییر اندازه به ارتفاع ثابت، دست‌خط را به نسبت زاویه کوچک می‌کند.
+با استفاده از \`quad\` و \`baseline_angle_deg\` می‌توانید ارتفاع بدنه متن را در راستای خط
+کرسی اندازه بگیرید (و نه ارتفاع کادر)، یا برش را با زاویه معلوم افقی کنید.
 `;
 
     // 3. Assemble files array
@@ -1509,23 +1736,79 @@ app.delete('/api/admin/prompts/:id', requireAdmin, (req, res) => {
 // The training set is the SEGMENTS: one cropped line paired with its exact label.
 // The full sheets are kept alongside as provenance, in their own manifest, because
 // a sheet has ten labels and cannot be a row in a filename->label table.
-const SEGMENT_CSV_HEADER = 'filename,text_label,sheet_filename,line_no,category,contributor_name,contributor_id,created_at\n';
+// `quad`, `baseline_angle_deg` and `masked_fraction` exist so the training pipeline
+// can make its own preprocessing decisions instead of inheriting ours. A slanted
+// line's crop is the bounding box of its shape, which is much taller than the text —
+// so resizing to a fixed height shrinks the handwriting in proportion to the slant.
+// With the geometry exported, a loader can normalise on x-height measured along the
+// baseline, or deskew by a known (human-drawn, not estimated) angle, and either
+// choice stays a versioned decision in the pipeline rather than baked into the data.
+const SEGMENT_CSV_HEADER =
+  'filename,text_label,sheet_filename,line_no,category,contributor_name,contributor_id,created_at,'
+  + 'quad,baseline_angle_deg,angle_source,masked_fraction\n';
 const SHEET_CSV_HEADER = 'filename,category,line_count,segment_count,contributor_name,contributor_id,created_at,drive_file_id\n';
+
+// A server-computed number, emitted bare rather than quoted and guarded.
+//
+// csvSafeCell prefixes anything starting with '-' to stop Excel treating it as a
+// formula, which is right for user-supplied text but wrong here: it turns a
+// baseline angle of -5.71 into the string '-5.71, which no loader can read as a
+// number. These values come from toFixed() on our own arithmetic, so there is
+// nothing to guard against.
+function csvNum(value) {
+  return { raw: String(value) };
+}
 
 // `v || ''` would blank out a legitimate 0 in the count columns, so only null and
 // undefined become empty cells.
 function csvRow(values) {
   return values
-    .map(v => `"${csvSafeCell(v === null || v === undefined ? '' : v).replace(/"/g, '""')}"`)
+    .map(v => {
+      if (v && typeof v === 'object' && 'raw' in v) return v.raw;
+      return `"${csvSafeCell(v === null || v === undefined ? '' : v).replace(/"/g, '""')}"`;
+    })
     .join(',') + '\n';
+}
+
+// The quad is stored against the full sheet; a consumer of the crop wants it in the
+// crop's own pixels, so shift it by the bounding-box origin. Emitted as eight plain
+// integers (TL TR BR BL) rather than JSON, so it survives CSV without nested quoting.
+function quadForExport(seg) {
+  let quad = null;
+  try { quad = seg.quad ? JSON.parse(seg.quad) : null; } catch (_) {}
+  if (!Array.isArray(quad) || quad.length !== 4) {
+    quad = [[seg.x, seg.y], [seg.x + seg.w, seg.y], [seg.x + seg.w, seg.y + seg.h], [seg.x, seg.y + seg.h]];
+  }
+  const local = quad.map(([px, py]) => [Math.round(px - seg.x), Math.round(py - seg.y)]);
+  return { text: local.flat().join(' '), quad };
+}
+
+// Best available angle, plus where it came from.
+//
+// A dragged quad is a deliberate human judgement, so it wins whenever it carries an
+// angle at all. An axis-aligned quad carries none — that is the rectangle-plus-
+// eraser workflow — so fall back to the angle measured from the ink. `angle_source`
+// is exported alongside it so a consumer can filter or weight by provenance instead
+// of having to guess which technique produced the sample.
+function angleForExport(seg, quad) {
+  const geometric = baselineAngleDeg(quad);
+  if (Math.abs(geometric) >= 0.05) return { deg: geometric, source: 'quad' };
+  if (typeof seg.ink_angle_deg === 'number') return { deg: seg.ink_angle_deg, source: 'ink' };
+  return { deg: null, source: 'none' };
 }
 
 function buildSegmentCsv(segments) {
   let csv = SEGMENT_CSV_HEADER;
   for (const seg of segments) {
+    const { text: quadText, quad } = quadForExport(seg);
+    const angle = angleForExport(seg, quad);
     csv += csvRow([
       seg.filename, seg.text, seg.sheet_filename, seg.line_no,
       seg.sheet_category || 'sentences', seg.contributor_name, seg.contributor_id, seg.created_at,
+      quadText,
+      csvNum(angle.deg === null ? '' : angle.deg.toFixed(2)),
+      angle.source,
+      csvNum((typeof seg.masked_fraction === 'number' ? seg.masked_fraction : 0).toFixed(4)),
     ]);
   }
   return csv;
@@ -1640,6 +1923,21 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
 
 نکته: هر برگه شامل چند سطر دست‌نویس است. برچسب‌گذاری در سطح سطر انجام می‌شود،
 بنابراین فایل labels.csv و پوشه segments/ منبع اصلی آموزش مدل هستند.
+
+ستون‌های هندسی در labels.csv (برای مرحله پیش‌پردازش):
+- quad               : هشت عدد صحیح «x1 y1 x2 y2 x3 y3 x4 y4» — چهار گوشه ناحیه متن،
+                       به ترتیب بالا-چپ، بالا-راست، پایین-راست، پایین-چپ، بر حسب
+                       پیکسل «تصویر برش‌خورده» (نه برگه کامل).
+- baseline_angle_deg : زاویه خط کرسی نوشتار بر حسب درجه. مقدار مثبت یعنی سطر به سمت
+                       راست بالا می‌رود. برای افقی کردن سطر، تصویر را به اندازه
+                       منفیِ این عدد بچرخانید. اگر خالی باشد یعنی زاویه قابل
+                       اندازه‌گیری نبوده است.
+- angle_source       : منبع زاویه بالا. «quad» یعنی از گوشه‌های کشیده‌شده توسط مدیر
+                       به دست آمده، «ink» یعنی از روی خودِ نوشته اندازه‌گیری شده
+                       (حالتی که مدیر کادر ساده کشیده و با پاک‌کن تمیز کرده است)،
+                       و «none» یعنی زاویه قابل تعیین نبوده است.
+- masked_fraction    : نسبتی از پیکسل‌های برش که کاغذ مصنوعی است (بیرون چهارضلعی به
+                       علاوه نواحی پاک‌شده) و نه تصویر واقعی برگه. عدد بین ۰ و ۱.
 `;
     archive.append(readme, { name: 'README.txt' });
 

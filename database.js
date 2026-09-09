@@ -134,6 +134,14 @@ async function initDatabase() {
   try { db.run(`ALTER TABLE segments ADD COLUMN quad TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE segments ADD COLUMN erase TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE segments ADD COLUMN bg_color TEXT`); } catch (_) {}
+  // How much of the crop is synthetic paper rather than photographed sheet. Measured
+  // from the rendered mask at save time, because brush caps and overlapping strokes
+  // make the analytic area wrong.
+  try { db.run(`ALTER TABLE segments ADD COLUMN masked_fraction REAL`); } catch (_) {}
+  // The line's angle measured from the ink of the finished crop. Needed because an
+  // admin who cleans a crooked line with the eraser instead of dragging the corners
+  // leaves an axis-aligned quad, from which no angle can be derived.
+  try { db.run(`ALTER TABLE segments ADD COLUMN ink_angle_deg REAL`); } catch (_) {}
 
   // Sheet-era columns: an image is now a whole page of lines, not a single word.
   try { db.run(`ALTER TABLE images ADD COLUMN assignment_id INTEGER`); } catch (_) {}
@@ -560,29 +568,32 @@ function upsertSegment(data) {
   const quadJson = data.quad ? JSON.stringify(data.quad) : null;
   const eraseJson = JSON.stringify(data.erase || []);
   const bgColor = data.bgColor || null;
+  const maskedFraction = typeof data.maskedFraction === 'number' ? data.maskedFraction : null;
+  const inkAngle = typeof data.inkAngleDeg === 'number' ? data.inkAngleDeg : null;
 
   if (existing) {
     run(`
       UPDATE segments
       SET prompt_id = ?, text = ?, x = ?, y = ?, w = ?, h = ?, filename = ?,
-          quad = ?, erase = ?, bg_color = ?, updated_at = datetime('now')
+          quad = ?, erase = ?, bg_color = ?, masked_fraction = ?, ink_angle_deg = ?,
+          updated_at = datetime('now')
       WHERE id = ?
     `, [
       data.promptId || null, data.text,
       data.x, data.y, data.w, data.h,
       data.filename || null,
-      quadJson, eraseJson, bgColor, existing.id,
+      quadJson, eraseJson, bgColor, maskedFraction, inkAngle, existing.id,
     ]);
     return { id: existing.id, previousFilename: existing.filename };
   }
 
   const result = run(`
-    INSERT INTO segments (image_id, prompt_id, line_no, text, x, y, w, h, filename, quad, erase, bg_color, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO segments (image_id, prompt_id, line_no, text, x, y, w, h, filename, quad, erase, bg_color, masked_fraction, ink_angle_deg, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `, [
     data.imageId, data.promptId || null, data.lineNo, data.text,
     data.x, data.y, data.w, data.h, data.filename || null,
-    quadJson, eraseJson, bgColor,
+    quadJson, eraseJson, bgColor, maskedFraction, inkAngle,
   ]);
   return { id: result.lastInsertRowid, previousFilename: null };
 }
@@ -874,6 +885,7 @@ function getApprovedForExport() {
 function getApprovedSegmentsForExport() {
   return all(`
     SELECT s.filename, s.text, s.line_no, s.x, s.y, s.w, s.h,
+           s.quad, s.masked_fraction, s.ink_angle_deg,
            i.filename AS sheet_filename, i.sheet_category, i.contributor_id,
            c.name AS contributor_name, i.created_at
     FROM segments s
