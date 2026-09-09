@@ -1218,3 +1218,503 @@ body {
     width: 100%;
   }
 }
+
+/* ==========================================================================
+   SHEET WORKFLOW (volunteer page)
+   A contributor writes one page of sentences and one page of numbers, so the
+   page is built around two switchable sheets rather than a single prompt card.
+   ========================================================================== */
+
+.sheet-tabs {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.sheet-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 10px;
+  border: 2px solid var(--gray-200);
+  background: white;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--gray-700);
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.sheet-tab:hover { border-color: var(--gray-300); }
+
+.sheet-tab.active {
+  border-color: var(--primary);
+  background: #eff6ff;
+  color: var(--primary-hover);
+}
+
+.sheet-tab-icon { font-size: 1.3rem; }
+.sheet-tab-label { line-height: 1.4; text-align: center; }
+
+.sheet-tab-state {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--gray-100);
+  color: var(--gray-500);
+}
+.sheet-tab-state.open { background: #eff6ff; color: #1d4ed8; }
+.sheet-tab-state.done { background: #dcfce7; color: #166534; }
+.sheet-tab-state.waiting { background: #fef3c7; color: #92400e; }
+
+.sheet-panel {
+  background: white;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.sheet-loading {
+  text-align: center;
+  color: var(--gray-500);
+  padding: 30px 0;
+}
+
+.sheet-howto {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e3a8a;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 0.9rem;
+  line-height: 1.9;
+  margin-bottom: 18px;
+}
+.sheet-howto.numbers {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+.sheet-howto.empty {
+  background: var(--gray-50);
+  border-color: var(--gray-200);
+  color: var(--gray-700);
+}
+
+.sheet-lines-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--gray-900);
+  margin-bottom: 10px;
+}
+
+.sheet-lines-count {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--gray-500);
+  background: var(--gray-100);
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.sheet-lines {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.sheet-lines li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--gray-100);
+  background: white;
+}
+.sheet-lines li:last-child { border-bottom: none; }
+.sheet-lines li:nth-child(even) { background: var(--gray-50); }
+
+.sheet-lines .line-no {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--primary);
+  color: white;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.sheet-lines .line-text {
+  font-size: 1.12rem;
+  line-height: 1.9;
+  color: var(--gray-900);
+  word-break: break-word;
+}
+
+.sheet-lines.numbers .line-no { background: #d97706; }
+.sheet-lines.numbers .line-text {
+  font-size: 1.35rem;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.sheet-warning {
+  background: #fef2f2;
+  border: 1.5px dashed #fca5a5;
+  color: #991b1b;
+  border-radius: 10px;
+  padding: 11px 14px;
+  font-size: 0.87rem;
+  line-height: 1.9;
+  margin-bottom: 18px;
+}
+
+.sheet-submitted {
+  display: none;
+  text-align: center;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+  border-radius: 10px;
+  padding: 22px 16px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+.sheet-submitted-icon { font-size: 2rem; margin-bottom: 6px; }
+
+/* --- Rotate & crop editor --- */
+
+.editor-container {
+  display: none;
+  margin-top: 20px;
+  border-top: 1px solid var(--gray-200);
+  padding-top: 18px;
+}
+.editor-container.active { display: block; }
+
+.editor-title {
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--gray-900);
+  margin-bottom: 6px;
+}
+
+.editor-hint {
+  font-size: 0.83rem;
+  color: var(--gray-500);
+  line-height: 1.9;
+  margin-bottom: 12px;
+}
+
+.editor-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.editor-canvas-wrap {
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+}
+
+#editorCanvas {
+  max-width: 100%;
+  touch-action: none; /* pointer drags must not scroll the page while cropping */
+  cursor: crosshair;
+  border-radius: 6px;
+  background: white;
+}
+
+.editor-meta {
+  font-size: 0.8rem;
+  color: var(--gray-500);
+  text-align: center;
+  margin: 10px 0 14px;
+}
+
+/* --- Completion --- */
+
+.completion-card {
+  background: white;
+  border: 2px solid #bbf7d0;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 26px 20px;
+  text-align: center;
+  margin-bottom: 20px;
+}
+.completion-icon { font-size: 2.4rem; margin-bottom: 8px; }
+.completion-card h3 { margin: 0 0 8px; font-size: 1.15rem; color: var(--gray-900); }
+.completion-card p { margin: 0 0 16px; color: var(--gray-500); font-size: 0.9rem; line-height: 1.9; }
+
+/* ==========================================================================
+   ADMIN — MANUAL SEGMENTATION WORKSPACE
+   The review modal is now a two-pane workspace: the sheet on the left to draw
+   rectangles on, the ordered line list on the right to walk through.
+   ========================================================================== */
+
+.modal-wide { max-width: 1200px; }
+
+.seg-info {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 6px 18px;
+  font-size: 0.85rem;
+  color: var(--gray-700);
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.seg-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+@media (max-width: 900px) {
+  .seg-layout { grid-template-columns: 1fr; }
+}
+
+.seg-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+}
+
+.seg-current { min-width: 0; }
+.seg-current-label { font-size: 0.82rem; color: #1e3a8a; }
+
+.seg-current-text {
+  display: block;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--gray-900);
+  line-height: 1.8;
+  word-break: break-word;
+}
+.seg-current-text.done { color: var(--success); font-size: 0.95rem; }
+
+.seg-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.seg-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.8rem;
+  color: var(--gray-700);
+  cursor: pointer;
+  user-select: none;
+}
+
+.seg-canvas-wrap {
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  padding: 8px;
+  max-height: 62vh;
+  overflow: auto;
+}
+
+#segCanvas {
+  display: block;
+  margin: 0 auto;
+  background: white;
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none; /* a drag must draw a box, not scroll the pane */
+}
+#segCanvas.busy { cursor: progress; opacity: 0.7; }
+
+.seg-hint {
+  font-size: 0.8rem;
+  color: var(--gray-500);
+  line-height: 1.9;
+  margin-top: 10px;
+}
+
+.seg-list-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--gray-900);
+  margin-bottom: 8px;
+}
+
+.seg-progress {
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+}
+.seg-progress.complete { background: #dcfce7; color: #166534; }
+
+.seg-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+
+.seg-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--gray-100);
+  cursor: pointer;
+  background: white;
+  transition: background 0.12s;
+}
+.seg-line:last-child { border-bottom: none; }
+.seg-line:hover { background: var(--gray-50); }
+
+.seg-line.active {
+  background: #eff6ff;
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+.seg-line.done .seg-line-no { background: var(--success); }
+.seg-line.active .seg-line-no { background: var(--danger); }
+
+.seg-line-no {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--gray-300);
+  color: white;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.seg-line-body { flex: 1; min-width: 0; }
+
+.seg-line-text {
+  font-size: 0.95rem;
+  line-height: 1.8;
+  color: var(--gray-900);
+  word-break: break-word;
+}
+
+.seg-line-thumb {
+  display: block;
+  margin-top: 6px;
+  max-width: 100%;
+  max-height: 54px;
+  border: 1px solid var(--gray-200);
+  border-radius: 4px;
+  background: white;
+}
+
+.seg-line-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.seg-line-btn {
+  background: none;
+  border: 1px solid var(--gray-300);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  color: var(--gray-700);
+}
+.seg-line-btn.danger { color: var(--danger); border-color: #fecaca; }
+.seg-line-btn.danger:hover { background: #fee2e2; }
+
+.seg-line-pending {
+  font-size: 0.7rem;
+  color: var(--gray-500);
+  background: var(--gray-100);
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.seg-warn {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.82rem;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 7px 12px;
+}
+
+.seg-ok {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.82rem;
+  color: #166534;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 7px 12px;
+}
+
+/* Segment progress badge on the image cards in the grid */
+.seg-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.seg-badge.complete { background: #dcfce7; color: #166534; }
+.seg-badge.partial  { background: #fef3c7; color: #92400e; }
+.seg-badge.none     { background: var(--gray-100); color: var(--gray-500); }
+
+/* `.modal-body img` forces width:100% for the old single-image modal; the line
+   thumbnails in the segmentation list must keep their natural aspect instead. */
+.modal-body .seg-line-thumb { width: auto; margin-bottom: 0; object-fit: contain; }

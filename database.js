@@ -71,15 +71,67 @@ async function initDatabase() {
     )
   `);
 
+  // An assignment is one sheet's worth of work: a fixed set of prompts handed to
+  // one contributor, written line-by-line on a single page, uploaded as ONE image.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS assignments (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      contributor_id TEXT NOT NULL,
+      category       TEXT NOT NULL,
+      status         TEXT DEFAULT 'open',
+      image_id       INTEGER,
+      created_at     TEXT DEFAULT (datetime('now')),
+      submitted_at   TEXT
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS assignment_items (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      assignment_id INTEGER NOT NULL,
+      prompt_id     INTEGER NOT NULL,
+      line_no       INTEGER NOT NULL
+    )
+  `);
+
+  // One admin-drawn rectangle per written line. x/y/w/h are pixel coordinates in
+  // the ORIGINAL uploaded image, so a crop can always be regenerated from source.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS segments (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      image_id   INTEGER NOT NULL,
+      prompt_id  INTEGER,
+      line_no    INTEGER NOT NULL,
+      text       TEXT NOT NULL,
+      x          INTEGER NOT NULL,
+      y          INTEGER NOT NULL,
+      w          INTEGER NOT NULL,
+      h          INTEGER NOT NULL,
+      filename   TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_assignments_contributor ON assignments(contributor_id, category, status)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_assignment_items_assignment ON assignment_items(assignment_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_assignment_items_prompt ON assignment_items(prompt_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_segments_image ON segments(image_id)`);
+  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_segments_image_line ON segments(image_id, line_no)`);
+
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_contributor ON images(contributor_id)`);
-  // getRandomPrompt LEFT JOINs images by prompt_id on every request.
+  // Kept for legacy rows: images.prompt_id is only set on pre-sheet uploads.
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_prompt ON images(prompt_id)`);
 
   // Migrate columns for security & contributor name
   try { db.run(`ALTER TABLE contributors ADD COLUMN name TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN ip_address TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN file_hash TEXT`); } catch (_) {}
+  // Sheet-era columns: an image is now a whole page of lines, not a single word.
+  try { db.run(`ALTER TABLE images ADD COLUMN assignment_id INTEGER`); } catch (_) {}
+  try { db.run(`ALTER TABLE images ADD COLUMN sheet_category TEXT`); } catch (_) {}
+  try { db.run(`CREATE INDEX IF NOT EXISTS idx_images_assignment ON images(assignment_id)`); } catch (_) {}
   try { db.run(`CREATE INDEX IF NOT EXISTS idx_images_ip ON images(ip_address)`); } catch (_) {}
   try { db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_images_file_hash_unique ON images(file_hash) WHERE file_hash IS NOT NULL AND status != 'rejected'`); } catch (_) {}
 
@@ -95,9 +147,48 @@ async function initDatabase() {
     )
   `);
 
+  wipeLegacySingleWordData();
+
   saveDatabase();
   console.log('[DB] Initialized successfully.');
   return db;
+}
+
+// One-time migration to the sheet format.
+//
+// Every pre-existing image row is one photo of ONE word, keyed by images.prompt_id.
+// The sheet workflow keys a photo to an assignment of 10 lines and derives labels
+// from segments, so the two shapes cannot be mixed in one export. The old rows are
+// removed; their files are moved to uploads/legacy/ rather than unlinked, so a
+// mistake here is recoverable by hand.
+function wipeLegacySingleWordData() {
+  if (getSetting('sheet_migration_done') === '1') return;
+
+  const legacyDir = path.join(config.UPLOAD_DIR, 'legacy');
+  const rows = all(`SELECT id, filename FROM images`);
+
+  if (rows.length > 0) {
+    fs.mkdirSync(legacyDir, { recursive: true });
+    for (const row of rows) {
+      for (const dir of [config.PENDING_DIR, config.APPROVED_DIR]) {
+        const src = path.join(dir, row.filename);
+        if (fs.existsSync(src)) {
+          try { fs.renameSync(src, path.join(legacyDir, row.filename)); } catch (_) {}
+        }
+      }
+    }
+    db.run(`DELETE FROM images`);
+    db.run(`DELETE FROM segments`);
+    db.run(`DELETE FROM assignment_items`);
+    db.run(`DELETE FROM assignments`);
+    try {
+      db.run(`UPDATE sqlite_sequence SET seq = 0 WHERE name IN ('images','segments','assignments','assignment_items')`);
+    } catch (_) {}
+  }
+
+  setSetting('sheet_migration_done', '1');
+  saveDatabase();
+  console.log(`[DB] Sheet-format migration: cleared ${rows.length} legacy single-word image row(s); files moved to uploads/legacy/.`);
 }
 
 function saveDatabase() {
@@ -198,125 +289,316 @@ function countContributorUploadsLastHour(id) {
 
 // --- Prompts ---
 
-// Serve the LEAST-COLLECTED prompt, not a uniformly random one.
+// --- Assignments (one sheet = one fixed set of prompts) ---
 //
-// Why: with a designed prompt list (every word above a coverage floor, every
-// confusion pair forced in), the value of the collection is that each line gets
-// written. Uniform random draws are coupon-collector: at N uploads over N
-// prompts roughly 37% of prompts are never written at all, while others are
-// written three or four times. Ordering by how many images a prompt already has
-// turns that into near-perfect one-each coverage.
+// A contributor is handed SENTENCES_PER_SHEET sentence/word prompts and, separately,
+// NUMBERS_PER_SHEET number prompts. They write each set line-by-line on one page and
+// upload that page as a single image. The prompt list must therefore be STABLE for
+// the whole time the page sits on the contributor's desk, which is why the selection
+// is persisted in `assignments` / `assignment_items` instead of being redrawn on
+// every request the way the old one-word-per-photo flow did.
 //
-// This also replaces any need to assign each volunteer a fixed block of 20.
-// Block assignment loses a volunteer's whole remainder when they stop after
-// five; least-collected simply hands those lines to whoever comes next.
+// Prompts are still picked LEAST-COLLECTED first: with a designed prompt list the
+// value of the collection is that every line gets written at least once, and uniform
+// random draws are coupon-collector (at N sheets over N prompts roughly 37% of
+// prompts are never written while others are written three or four times).
 //
-// Rejected images do NOT count as collected, so a rejected prompt returns to
-// the front of the queue. Pending ones DO count, so five people online at once
-// are not all sent the same line while it waits for review.
-//
-// The contributor's own last 5 are still excluded, so nobody is asked to write
-// Detailed contributor progress tracking (sentences vs numbers)
+// "Collected" counts a prompt that sits on a sheet whose image exists and was not
+// rejected. A rejected sheet returns all ten of its prompts to the front of the
+// queue; a pending one keeps them out of it, so ten volunteers online at once are
+// not all handed the same page.
+
+const SHEET_CATEGORIES = ['sentences', 'numbers'];
+
+function sheetSize(category) {
+  return category === 'numbers'
+    ? (config.NUMBERS_PER_SHEET || 10)
+    : (config.SENTENCES_PER_SHEET || 10);
+}
+
+// SQL fragment matching prompts belonging to a sheet category. Everything that is
+// not explicitly categorised as 'numbers' counts as a sentence/word.
+function categoryCondition(category) {
+  return category === 'numbers' ? `p.category = 'numbers'` : `p.category != 'numbers'`;
+}
+
+// Least-collected prompts for a category, skipping ones this contributor has been
+// assigned before (in any set, submitted or not).
+function pickPromptsForSheet(contributorId, category, count) {
+  const excluded = all(`
+    SELECT DISTINCT ai.prompt_id
+    FROM assignment_items ai
+    JOIN assignments a ON a.id = ai.assignment_id
+    WHERE a.contributor_id = ?
+  `, [contributorId]).map(r => r.prompt_id);
+
+  const select = (excludeIds) => {
+    const exclude = excludeIds.length
+      ? `AND p.id NOT IN (${excludeIds.map(() => '?').join(',')})`
+      : '';
+    return all(`
+      SELECT p.*, COUNT(i.id) AS collected
+      FROM prompts p
+      LEFT JOIN assignment_items ai ON ai.prompt_id = p.id
+      LEFT JOIN assignments a ON a.id = ai.assignment_id
+      LEFT JOIN images i ON i.id = a.image_id AND i.status != 'rejected'
+      WHERE p.active = 1 AND ${categoryCondition(category)} ${exclude}
+      GROUP BY p.id
+      ORDER BY collected ASC, RANDOM()
+      LIMIT ?
+    `, [...excludeIds, count]);
+  };
+
+  let rows = select(excluded);
+
+  // A long-running volunteer can exhaust the pool of prompts they have never seen.
+  // Rather than hand them a short sheet, top it up with repeats they have written
+  // before, still least-collected first.
+  if (rows.length < count) {
+    const have = new Set(rows.map(r => r.id));
+    for (const row of select([])) {
+      if (rows.length >= count) break;
+      if (!have.has(row.id)) {
+        have.add(row.id);
+        rows.push(row);
+      }
+    }
+  }
+
+  return rows.slice(0, count);
+}
+
+function getAssignmentItems(assignmentId) {
+  return all(`
+    SELECT ai.id, ai.line_no, ai.prompt_id, p.text, p.category
+    FROM assignment_items ai
+    LEFT JOIN prompts p ON p.id = ai.prompt_id
+    WHERE ai.assignment_id = ?
+    ORDER BY ai.line_no ASC
+  `, [assignmentId]);
+}
+
+function getOpenAssignment(contributorId, category) {
+  return get(`
+    SELECT * FROM assignments
+    WHERE contributor_id = ? AND category = ? AND status = 'open'
+    ORDER BY id DESC LIMIT 1
+  `, [contributorId, category]);
+}
+
+function getAssignment(id) {
+  return get(`SELECT * FROM assignments WHERE id = ?`, [id]);
+}
+
+// Create an open assignment and fill it with prompts. Returns null when the prompt
+// bank for that category is empty (admin has not uploaded the texts yet).
+function createAssignment(contributorId, category) {
+  const size = sheetSize(category);
+  const prompts = pickPromptsForSheet(contributorId, category, size);
+  if (prompts.length === 0) return null;
+
+  const result = run(
+    `INSERT INTO assignments (contributor_id, category) VALUES (?, ?)`,
+    [contributorId, category]
+  );
+  const assignmentId = result.lastInsertRowid;
+
+  prompts.forEach((prompt, index) => {
+    db.run(
+      `INSERT INTO assignment_items (assignment_id, prompt_id, line_no) VALUES (?, ?, ?)`,
+      [assignmentId, prompt.id, index + 1]
+    );
+  });
+  markDirty();
+
+  return getAssignment(assignmentId);
+}
+
+function getLatestAssignment(contributorId, category) {
+  return get(`
+    SELECT * FROM assignments
+    WHERE contributor_id = ? AND category = ?
+    ORDER BY id DESC LIMIT 1
+  `, [contributorId, category]);
+}
+
+// The contributor's CURRENT sheet for a category — the most recent one, whatever
+// its state. Only a contributor who has never had a sheet in this category gets one
+// created here; a submitted sheet must keep reporting as submitted until the
+// volunteer explicitly asks for a new set, otherwise merely loading the page would
+// hand out fresh prompts and the "both sheets done" state could never be reached.
+function getOrCreateAssignment(contributorId, category) {
+  const latest = getLatestAssignment(contributorId, category);
+  if (latest) return latest;
+  return createAssignment(contributorId, category);
+}
+
+function markAssignmentSubmitted(assignmentId, imageId) {
+  return run(
+    `UPDATE assignments SET status = 'submitted', image_id = ?, submitted_at = datetime('now') WHERE id = ?`,
+    [imageId, assignmentId]
+  );
+}
+
+// A rejected or purged sheet frees its assignment so the contributor can rewrite
+// exactly the same ten lines rather than being handed a different page.
+function reopenAssignmentForImage(imageId) {
+  return run(
+    `UPDATE assignments SET status = 'open', image_id = NULL, submitted_at = NULL WHERE image_id = ?`,
+    [imageId]
+  );
+}
+
+// Full state of a contributor's current sheets, for the volunteer-facing page.
+function getContributorSheetState(contributorId) {
+  const sheets = {};
+  for (const category of SHEET_CATEGORIES) {
+    const assignment = getOrCreateAssignment(contributorId, category);
+    if (!assignment) {
+      sheets[category] = { available: false, size: sheetSize(category) };
+      continue;
+    }
+    const image = assignment.image_id ? get(`SELECT id, status, filename FROM images WHERE id = ?`, [assignment.image_id]) : null;
+    sheets[category] = {
+      available: true,
+      assignment_id: assignment.id,
+      status: assignment.status,
+      size: sheetSize(category),
+      items: getAssignmentItems(assignment.id).map(item => ({
+        line_no: item.line_no,
+        prompt_id: item.prompt_id,
+        text: item.text,
+      })),
+      image: image ? { id: image.id, status: image.status } : null,
+    };
+  }
+
+  const completed = get(`
+    SELECT COUNT(*) AS c FROM assignments a
+    JOIN images i ON i.id = a.image_id
+    WHERE a.contributor_id = ? AND a.status = 'submitted' AND i.status != 'rejected'
+  `, [contributorId]);
+
+  return {
+    sheets,
+    completedSheets: completed ? completed.c : 0,
+  };
+}
+
+// Both sheets done -> the volunteer may ask for a fresh set of ten and ten.
+function startNewSheetSet(contributorId) {
+  const created = [];
+  for (const category of SHEET_CATEGORIES) {
+    if (getOpenAssignment(contributorId, category)) continue;
+    const assignment = createAssignment(contributorId, category);
+    if (assignment) created.push(category);
+  }
+  return created;
+}
+
+// Legacy-compatible progress summary, now counted in sheets rather than photos.
 function getContributorProgress(contributorId) {
   if (!contributorId) return { sentences: 0, numbers: 0, total: 0 };
-
   const rows = all(`
-    SELECT i.prompt_id, i.custom_text, p.category
-    FROM images i
-    LEFT JOIN prompts p ON i.prompt_id = p.id
-    WHERE i.contributor_id = ? AND i.status != 'rejected'
+    SELECT a.category, COUNT(*) AS c
+    FROM assignments a
+    JOIN images i ON i.id = a.image_id
+    WHERE a.contributor_id = ? AND a.status = 'submitted' AND i.status != 'rejected'
+    GROUP BY a.category
   `, [contributorId]);
 
   let sentences = 0;
   let numbers = 0;
-
   for (const row of rows) {
-    if (row.category === 'numbers') {
-      numbers++;
-    } else if (row.prompt_id && row.category && row.category !== 'numbers') {
-      sentences++;
-    } else if (row.custom_text) {
-      const isNumber = /^[\d\s۰-۹\u06F0-\u06F9\u0660-\u0669\-+.,/]+$/.test(row.custom_text.trim());
-      if (isNumber) {
-        numbers++;
-      } else {
-        sentences++;
-      }
-    } else {
-      sentences++;
-    }
+    if (row.category === 'numbers') numbers = row.c;
+    else sentences = row.c;
   }
-
-  return {
-    sentences,
-    numbers,
-    total: sentences + numbers,
-  };
+  return { sentences, numbers, total: sentences + numbers };
 }
 
-// Serve the LEAST-COLLECTED prompt sequenced:
-// Stage 1 (first 20): sentences/words (category != 'numbers')
-// Stage 2 (next 40): numbers (category = 'numbers')
-function getRandomPrompt(contributorId, forcedCategory = null) {
-  let targetCategory = forcedCategory;
+// --- Segments (admin-drawn crops) ---
 
-  if (!targetCategory && contributorId) {
-    const progress = getContributorProgress(contributorId);
-    if (progress.sentences < 20) {
-      targetCategory = 'sentences';
-    } else {
-      targetCategory = 'numbers';
-    }
+function getSegments(imageId) {
+  return all(`SELECT * FROM segments WHERE image_id = ? ORDER BY line_no ASC`, [imageId]);
+}
+
+function getSegment(imageId, lineNo) {
+  return get(`SELECT * FROM segments WHERE image_id = ? AND line_no = ?`, [imageId, lineNo]);
+}
+
+function upsertSegment(data) {
+  const existing = getSegment(data.imageId, data.lineNo);
+  if (existing) {
+    run(`
+      UPDATE segments
+      SET prompt_id = ?, text = ?, x = ?, y = ?, w = ?, h = ?, filename = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `, [
+      data.promptId || null, data.text,
+      data.x, data.y, data.w, data.h,
+      data.filename || null, existing.id,
+    ]);
+    return { id: existing.id, previousFilename: existing.filename };
   }
 
-  let doneIds = [];
-  if (contributorId) {
-    // Exclude ALL prompts this contributor has already written (not just last 5)
-    doneIds = all(
-      `SELECT DISTINCT prompt_id FROM images WHERE contributor_id = ? AND prompt_id IS NOT NULL AND status != 'rejected'`,
-      [contributorId]
-    ).map(r => r.prompt_id);
-  }
+  const result = run(`
+    INSERT INTO segments (image_id, prompt_id, line_no, text, x, y, w, h, filename, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+  `, [
+    data.imageId, data.promptId || null, data.lineNo, data.text,
+    data.x, data.y, data.w, data.h, data.filename || null,
+  ]);
+  return { id: result.lastInsertRowid, previousFilename: null };
+}
 
-  const leastCollected = (excludeIds, categoryCondition, params = []) => {
-    const exclude = excludeIds.length
-      ? `AND p.id NOT IN (${excludeIds.map(() => '?').join(',')})`
-      : '';
-    const catSql = categoryCondition ? `AND (${categoryCondition})` : '';
-    const allParams = [...excludeIds, ...params];
+function deleteSegment(imageId, lineNo) {
+  const existing = getSegment(imageId, lineNo);
+  if (!existing) return null;
+  run(`DELETE FROM segments WHERE id = ?`, [existing.id]);
+  return existing;
+}
 
-    return get(`
-      SELECT p.*, COUNT(i.id) AS collected
-      FROM prompts p
-      LEFT JOIN images i ON i.prompt_id = p.id AND i.status != 'rejected'
-      WHERE p.active = 1 ${exclude} ${catSql}
-      GROUP BY p.id
-      ORDER BY collected ASC, RANDOM()
-      LIMIT 1
-    `, allParams);
-  };
+function deleteSegmentsForImages(imageIds) {
+  if (!imageIds || !imageIds.length) return [];
+  const placeholders = imageIds.map(() => '?').join(',');
+  const rows = all(`SELECT id, filename FROM segments WHERE image_id IN (${placeholders})`, imageIds);
+  db.run(`DELETE FROM segments WHERE image_id IN (${placeholders})`, imageIds);
+  markDirty();
+  return rows;
+}
 
-  let prompt = null;
+function countSegments(imageId) {
+  const row = get(`SELECT COUNT(*) AS c FROM segments WHERE image_id = ?`, [imageId]);
+  return row ? row.c : 0;
+}
 
-  if (targetCategory === 'numbers') {
-    prompt = leastCollected(doneIds, "p.category = 'numbers'");
-    if (!prompt && !contributorId) {
-      prompt = leastCollected([], "p.category = 'numbers'");
-    }
-  } else if (targetCategory === 'sentences') {
-    prompt = leastCollected(doneIds, "p.category != 'numbers'");
-    if (!prompt && !contributorId) {
-      prompt = leastCollected([], "p.category != 'numbers'");
-    }
+// The expected line list for a sheet, each line paired with its saved rectangle
+// (or null when the admin has not drawn it yet). Legacy rows that predate the
+// sheet format fall back to their single prompt/custom text as line 1.
+function getImageLines(imageId) {
+  const image = get(`SELECT * FROM images WHERE id = ?`, [imageId]);
+  if (!image) return [];
+
+  let lines;
+  if (image.assignment_id) {
+    lines = getAssignmentItems(image.assignment_id).map(item => ({
+      line_no: item.line_no,
+      prompt_id: item.prompt_id,
+      text: item.text,
+    }));
   } else {
-    prompt = leastCollected(doneIds, null);
-    if (!prompt && !contributorId) {
-      prompt = leastCollected([], null);
-    }
+    lines = [{ line_no: 1, prompt_id: image.prompt_id || null, text: image.custom_text || '' }];
   }
 
-  return prompt;
+  const segments = getSegments(imageId);
+  const byLine = new Map(segments.map(s => [s.line_no, s]));
+  return lines.map(line => ({
+    ...line,
+    segment: byLine.get(line.line_no) || null,
+  }));
 }
+
+// --- Prompts ---
 
 function getAllPrompts(activeOnly) {
   if (activeOnly) {
@@ -333,9 +615,12 @@ function togglePrompt(id, active) {
   return run(`UPDATE prompts SET active = ? WHERE id = ?`, [active ? 1 : 0, id]);
 }
 
+// A prompt is "in use" once it has been placed on any sheet — images no longer
+// reference prompts directly, assignment_items does.
 function countPromptImages(promptId) {
-  const row = get(`SELECT COUNT(*) as c FROM images WHERE prompt_id = ?`, [promptId]);
-  return row ? row.c : 0;
+  const legacy = get(`SELECT COUNT(*) as c FROM images WHERE prompt_id = ?`, [promptId]);
+  const assigned = get(`SELECT COUNT(*) as c FROM assignment_items WHERE prompt_id = ?`, [promptId]);
+  return (legacy ? legacy.c : 0) + (assigned ? assigned.c : 0);
 }
 
 function deletePrompt(id) {
@@ -384,11 +669,17 @@ function createImage(data) {
   if (!contributor) {
     throw Object.assign(new Error('شناسه مشارکت‌کننده در سامانه یافت نشد.'), { statusCode: 400 });
   }
-  if (data.promptId) {
-    const prompt = get(`SELECT id, active FROM prompts WHERE id = ?`, [data.promptId]);
-    if (!prompt) {
-      throw Object.assign(new Error('متن انتخابی در سامانه یافت نشد.'), { statusCode: 400 });
-    }
+  // The sheet must still be open and must belong to this contributor: re-checked
+  // here, inside the insert mutex, so two parallel uploads cannot both claim it.
+  const assignment = getAssignment(data.assignmentId);
+  if (!assignment) {
+    throw Object.assign(new Error('برگه انتخابی در سامانه یافت نشد.'), { statusCode: 400 });
+  }
+  if (assignment.contributor_id !== data.contributorId) {
+    throw Object.assign(new Error('این برگه متعلق به شما نیست.'), { statusCode: 403 });
+  }
+  if (assignment.status !== 'open') {
+    throw Object.assign(new Error('برای این برگه قبلاً تصویری ارسال شده است.'), { statusCode: 409 });
   }
 
   // Atomic duplicate-hash guard: re-check inside lock to close the race window
@@ -399,20 +690,23 @@ function createImage(data) {
     }
   }
 
-  return run(`
-    INSERT INTO images (filename, original_name, prompt_id, custom_text, contributor_id, mime_type, file_size, ip_address, file_hash)
+  const result = run(`
+    INSERT INTO images (filename, original_name, contributor_id, mime_type, file_size, ip_address, file_hash, assignment_id, sheet_category)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     data.filename,
     data.originalName || null,
-    data.promptId || null,
-    data.customText || null,
     data.contributorId,
     data.mimeType || null,
     data.fileSize || 0,
     data.ipAddress || null,
-    data.fileHash || null
+    data.fileHash || null,
+    assignment.id,
+    assignment.category,
   ]);
+
+  markAssignmentSubmitted(assignment.id, result.lastInsertRowid);
+  return result;
 }
 
 // Serialize createImage calls so two concurrent uploads with the same hash
@@ -446,7 +740,9 @@ function getImages({ status, page, limit }) {
 
   const countRow = get(`SELECT COUNT(*) as total FROM images i ${where}`, params);
   const images = all(`
-    SELECT i.*, p.text as prompt_text, p.category as prompt_category, c.name as contributor_name
+    SELECT i.*, p.text as prompt_text, p.category as prompt_category, c.name as contributor_name,
+           (SELECT COUNT(*) FROM assignment_items ai WHERE ai.assignment_id = i.assignment_id) AS line_count,
+           (SELECT COUNT(*) FROM segments s WHERE s.image_id = i.id) AS segment_count
     FROM images i
     LEFT JOIN prompts p ON i.prompt_id = p.id
     LEFT JOIN contributors c ON i.contributor_id = c.id
@@ -465,7 +761,9 @@ function getImages({ status, page, limit }) {
 
 function getImage(id) {
   return get(`
-    SELECT i.*, p.text as prompt_text, p.category as prompt_category, c.name as contributor_name
+    SELECT i.*, p.text as prompt_text, p.category as prompt_category, c.name as contributor_name,
+           (SELECT COUNT(*) FROM assignment_items ai WHERE ai.assignment_id = i.assignment_id) AS line_count,
+           (SELECT COUNT(*) FROM segments s WHERE s.image_id = i.id) AS segment_count
     FROM images i
     LEFT JOIN prompts p ON i.prompt_id = p.id
     LEFT JOIN contributors c ON i.contributor_id = c.id
@@ -474,7 +772,14 @@ function getImage(id) {
 }
 
 function updateImageStatus(id, status, rejectionReason) {
-  return run(`UPDATE images SET status = ?, rejection_reason = ?, reviewed_at = datetime('now') WHERE id = ?`, [status, rejectionReason || null, id]);
+  const result = run(
+    `UPDATE images SET status = ?, rejection_reason = ?, reviewed_at = datetime('now') WHERE id = ?`,
+    [status, rejectionReason || null, id]
+  );
+  // A rejected sheet hands its ten lines back to the volunteer to rewrite.
+  if (status === 'rejected') reopenAssignmentForImage(id);
+  else run(`UPDATE assignments SET status = 'submitted', image_id = ? WHERE id = (SELECT assignment_id FROM images WHERE id = ?)`, [id, id]);
+  return result;
 }
 
 function setDriveFileId(id, driveFileId) {
@@ -500,22 +805,46 @@ function getStats() {
   const synced = get(`SELECT COUNT(*) as c FROM images WHERE drive_file_id IS NOT NULL`).c;
   const contributors = get(`SELECT COUNT(*) as c FROM contributors`).c;
   const prompts = get(`SELECT COUNT(*) as c FROM prompts WHERE active = 1`).c;
-  return { total, pending, approved, rejected, synced, contributors, prompts };
+  const segments = get(`SELECT COUNT(*) as c FROM segments`).c;
+  const segmentsApproved = get(`
+    SELECT COUNT(*) as c FROM segments s
+    JOIN images i ON i.id = s.image_id
+    WHERE i.status = 'approved'
+  `).c;
+  return { total, pending, approved, rejected, synced, contributors, prompts, segments, segmentsApproved };
 }
 
 function getContributorUploadCount(contributorId) {
   return get(`SELECT COUNT(*) as c FROM images WHERE contributor_id = ?`, [contributorId]).c;
 }
 
+// One row per approved SHEET (the full page image).
 function getApprovedForExport() {
   return all(`
     SELECT i.filename, i.custom_text, i.contributor_id, c.name as contributor_name, i.created_at, i.drive_file_id,
-           p.text as prompt_text
+           i.sheet_category, p.text as prompt_text,
+           (SELECT COUNT(*) FROM assignment_items ai WHERE ai.assignment_id = i.assignment_id) AS line_count,
+           (SELECT COUNT(*) FROM segments s WHERE s.image_id = i.id) AS segment_count
     FROM images i
     LEFT JOIN prompts p ON i.prompt_id = p.id
     LEFT JOIN contributors c ON i.contributor_id = c.id
     WHERE i.status = 'approved'
     ORDER BY i.created_at ASC
+  `);
+}
+
+// One row per admin-cropped LINE of an approved sheet. This is the actual training
+// dataset: a tight image of one word/sentence/number paired with its exact label.
+function getApprovedSegmentsForExport() {
+  return all(`
+    SELECT s.filename, s.text, s.line_no, s.x, s.y, s.w, s.h,
+           i.filename AS sheet_filename, i.sheet_category, i.contributor_id,
+           c.name AS contributor_name, i.created_at
+    FROM segments s
+    JOIN images i ON i.id = s.image_id
+    LEFT JOIN contributors c ON c.id = i.contributor_id
+    WHERE i.status = 'approved' AND s.filename IS NOT NULL
+    ORDER BY i.created_at ASC, s.line_no ASC
   `);
 }
 
@@ -567,12 +896,26 @@ function getAllRejectedImages() {
   return all(`SELECT id, filename, status FROM images WHERE status = 'rejected'`);
 }
 
+// Returns the segment rows removed with the image, so the caller can unlink their
+// crop files; an image row must never outlive its children or vice versa.
 function deleteImage(id) {
-  return run(`DELETE FROM images WHERE id = ?`, [id]);
+  const removedSegments = deleteSegmentsForImages([id]);
+  reopenAssignmentForImage(id);
+  run(`DELETE FROM images WHERE id = ?`, [id]);
+  return removedSegments;
 }
 
+// Returns the segment rows that were removed alongside the images, so the caller
+// can unlink their crop files.
 function deleteImagesBatch(ids) {
   if (!ids || !ids.length) return 0;
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const placeholders = chunk.map(() => '?').join(',');
+    // Detach the assignment first: an image row about to disappear must not leave
+    // a submitted assignment pointing at a missing sheet.
+    db.run(`UPDATE assignments SET status = 'open', image_id = NULL, submitted_at = NULL WHERE image_id IN (${placeholders})`, chunk);
+  }
   for (let i = 0; i < ids.length; i += 500) {
     const chunk = ids.slice(i, i + 500);
     const placeholders = chunk.map(() => '?').join(',');
@@ -596,6 +939,14 @@ function updateImagesStatusBatch(ids, status, rejectionReason) {
       SET status = ?, rejection_reason = ?, reviewed_at = datetime('now')
       WHERE id IN (${chunkPlaceholders})
     `, [status, rejectionReason || null, ...chunk]);
+
+    // Rejecting a sheet hands its ten lines back to the volunteer to rewrite.
+    if (status === 'rejected') {
+      db.run(`
+        UPDATE assignments SET status = 'open', image_id = NULL, submitted_at = NULL
+        WHERE image_id IN (${chunkPlaceholders})
+      `, chunk);
+    }
   }
   markDirty();
   return images;
@@ -648,7 +999,28 @@ module.exports = {
   deleteImage,
   deleteImagesBatch,
   updateImagesStatusBatch,
-  getRandomPrompt,
+  // Sheets / assignments
+  SHEET_CATEGORIES,
+  sheetSize,
+  getAssignment,
+  getOpenAssignment,
+  getLatestAssignment,
+  getOrCreateAssignment,
+  getAssignmentItems,
+  createAssignment,
+  markAssignmentSubmitted,
+  reopenAssignmentForImage,
+  getContributorSheetState,
+  startNewSheetSet,
+  // Segments
+  getSegments,
+  getSegment,
+  upsertSegment,
+  deleteSegment,
+  deleteSegmentsForImages,
+  countSegments,
+  getImageLines,
+  getApprovedSegmentsForExport,
   getAllPrompts,
   getPromptById,
   createPrompt,

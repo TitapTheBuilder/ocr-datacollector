@@ -325,8 +325,19 @@ function purgeRejectedImages(db, forceAll = false) {
       idsToDelete.push(img.id);
     }
 
-    // 2. Batch delete rows from database
+    // 2. Batch delete rows from database. Segments are children of the sheet, so
+    // their crop files and rows go with it.
     if (idsToDelete.length > 0) {
+      const removedSegments = db.deleteSegmentsForImages(idsToDelete);
+      for (const seg of removedSegments) {
+        if (!seg.filename) continue;
+        const segPath = path.join(config.SEGMENTS_DIR, seg.filename);
+        if (fs.existsSync(segPath)) {
+          try { fs.unlinkSync(segPath); } catch (err) {
+            console.warn(`[Security Cleanup] Could not delete segment ${segPath}:`, err.message);
+          }
+        }
+      }
       db.deleteImagesBatch(idsToDelete);
       // Invalidate storage cache
       lastStorageCheck = 0;

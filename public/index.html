@@ -26,112 +26,136 @@
       </button>
     </div>
 
-    <!-- User Instructions Card (Important Guidelines) -->
+    <!-- Global instructions -->
     <div class="instructions-card">
       <div class="instructions-header">
         <span class="instructions-icon">📌</span>
-        <strong>نکات بسیار مهم قبل از شروع نوشتن و ارسال:</strong>
+        <strong>نکات بسیار مهم قبل از شروع نوشتن:</strong>
       </div>
       <ol class="instructions-list">
-        <li>روی برگه سفید بنویسید (خط دار نباشد).</li>
-        <li>بدون خط خوردگی باشد.</li>
-        <li>تصویر افقی باشد.</li>
-        <li>محتوای دیگری جز چیز خواسته شده در تصویر نباشد.</li>
-        <li>اعداد را حتماً به فارسی بنویسید.</li>
+        <li>روی برگه <strong>سفید و بدون خط</strong> بنویسید.</li>
+        <li>هر مورد را دقیقاً در <strong>یک سطر</strong> بنویسید؛ هیچ عبارتی را در دو سطر نشکنید.</li>
+        <li>سطرها را به <strong>ترتیب شماره</strong> و با فاصله مناسب از هم بنویسید.</li>
+        <li>بدون خط خوردگی بنویسید و محتوای اضافه‌ای روی برگه نباشد.</li>
+        <li>از کل برگه یک عکس واضح و صاف بگیرید (نور کافی، بدون سایه).</li>
+        <li>اعداد را حتماً با <strong>ارقام فارسی</strong> بنویسید.</li>
       </ol>
     </div>
 
-    <!-- Goal & Progress Card (20 Sentences + 40 Numbers Target) -->
+    <!-- Sheet progress -->
     <div class="goal-card">
       <div class="goal-header">
         <div class="goal-title">
           <span class="goal-icon">🎯</span>
-          <span>سهمیه شما: <strong>۲۰ جمله</strong> + <strong>۴۰ عدد</strong> دست‌نویس</span>
+          <span>سهمیه شما: <strong id="goalSummary">دو برگه</strong></span>
         </div>
-        <span id="remainingBadge" class="remaining-badge">۲۰ جمله باقی‌مانده (مرحله ۱)</span>
+        <span id="remainingBadge" class="remaining-badge">در حال بارگذاری...</span>
       </div>
       <div class="progress-bar-container">
         <div id="goalProgressFill" class="progress-bar-fill" style="width: 0%;"></div>
       </div>
       <div class="goal-footer">
-        <span id="goalCountText">مرحله ۱: ۰ از ۲۰ جمله (سپس ۴۰ عدد)</span>
+        <span id="goalCountText">—</span>
         <span id="goalPercentText">۰٪</span>
       </div>
-      <div class="goal-stage-breakdown" style="display:flex; gap:8px; margin-top:12px; font-size:0.82rem;">
-        <div id="sentenceStagePill" style="flex:1; text-align:center; padding:6px 10px; border-radius:8px; background:#eff6ff; color:#1d4ed8; font-weight:600; border:1px solid #bfdbfe;">
-          📝 مرحله ۱: جملات (۰ از ۲۰)
-        </div>
-        <div id="numberStagePill" style="flex:1; text-align:center; padding:6px 10px; border-radius:8px; background:#f3f4f6; color:#6b7280; font-weight:600; border:1px solid #e5e7eb;">
-          🔢 مرحله ۲: اعداد (۰ از ۴۰)
-        </div>
-      </div>
     </div>
 
-    <!-- Prompt Card -->
-    <div id="promptCard" class="prompt-card">
-      <div class="prompt-top-bar">
-        <span id="promptCategory" class="prompt-category"></span>
-        <button id="btnNextPrompt" class="btn-text" type="button" title="دریافت متن جدید">
-          <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          متن دیگر
-        </button>
-      </div>
-      <div class="prompt-label">متن زیر را با خودکار روی برگه سفید بنویسید و عکس افقی بگیرید:</div>
-      <div id="promptText" class="prompt-text">در حال بارگذاری...</div>
-
-      <!-- Persian Number Warning / Guideline Reminder -->
-      <div id="numberGuidanceReminder" style="display:none; background:#fffbeb; border:1.5px dashed #f59e0b; color:#92400e; padding:10px 14px; border-radius:8px; font-size:0.86rem; margin-top:12px; align-items:center; gap:8px;">
-        <span style="font-size:1.25rem;">🔢</span>
-        <div><strong>توجه (مرحله اعداد):</strong> این عدد را روی کاغذ سفید حتماً به <u>ارقام فارسی</u> بنویسید (مانند ۱۲۳۴۵ نه 12345).</div>
-      </div>
+    <!-- Sheet switcher -->
+    <div class="sheet-tabs">
+      <button type="button" class="sheet-tab active" data-sheet="sentences" id="tabSentences">
+        <span class="sheet-tab-icon">📝</span>
+        <span class="sheet-tab-label">برگه ۱: جملات و کلمات</span>
+        <span class="sheet-tab-state" id="tabSentencesState">—</span>
+      </button>
+      <button type="button" class="sheet-tab" data-sheet="numbers" id="tabNumbers">
+        <span class="sheet-tab-icon">🔢</span>
+        <span class="sheet-tab-label">برگه ۲: اعداد</span>
+        <span class="sheet-tab-state" id="tabNumbersState">—</span>
+      </button>
     </div>
 
-    <!-- Capture & Upload Area (Whiteboard Removed) -->
-    <div class="capture-area">
-      <div class="custom-text-section">
-        <button id="customTextToggle" class="custom-text-toggle" type="button">✏️ نوشتن متن دلخواه به جای متن پیشنهادی</button>
-        <div id="customTextForm" class="custom-text-form">
-          <input type="text" id="customTextInput" class="custom-text-input" placeholder="متن دست‌نویس دلخواه خود را اینجا بنویسید...">
+    <!-- Sheet panel -->
+    <div id="sheetPanel" class="sheet-panel">
+      <div id="sheetLoading" class="sheet-loading">در حال بارگذاری برگه...</div>
+
+      <div id="sheetContent" style="display:none;">
+        <div class="sheet-howto" id="sheetHowto"></div>
+
+        <div class="sheet-lines-head">
+          <span id="sheetLinesTitle">متن‌های این برگه</span>
+          <span class="sheet-lines-count" id="sheetLinesCount"></span>
         </div>
-      </div>
+        <ol id="sheetLines" class="sheet-lines"></ol>
 
-      <div class="upload-actions-wrapper">
-        <div class="capture-buttons">
-          <label for="cameraInput" class="btn btn-primary">
-            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            عکس بگیرید
-          </label>
-          <label for="fileInput" class="btn btn-outline">
-            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            انتخاب تصویر
-          </label>
-          <button type="button" id="btnPaste" class="btn btn-outline">
-            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
-            الصاق کلیپ‌بورد
-          </button>
+        <div class="sheet-warning">
+          ⚠️ هر سطر بالا را دقیقاً در <strong>یک سطر</strong> از برگه بنویسید. یک عبارت را در دو سطر ننویسید و دو عبارت را در یک سطر ننویسید.
         </div>
-        <div class="paste-hint">می‌توانید تصویر را با کلیدهای Ctrl+V نیز الصاق کنید</div>
 
-        <input type="file" id="cameraInput" class="file-input" accept="image/*" capture="environment">
-        <input type="file" id="fileInput" class="file-input" accept="image/*">
-        <!-- Anti-bot honeypot field -->
-        <input type="text" id="hpWebsite" name="hp_website" style="display:none !important;" tabindex="-1" autocomplete="off" aria-hidden="true">
-
-        <div id="previewContainer" class="preview-container">
-          <div id="previewLabelBox" class="preview-label-box">
-            <span>متن ارسالی: </span>
-            <strong id="previewLabelText">—</strong>
+        <!-- Upload / editor -->
+        <div id="sheetUpload" class="capture-area">
+          <div class="capture-buttons">
+            <label for="cameraInput" class="btn btn-primary">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              عکس بگیرید
+            </label>
+            <label for="fileInput" class="btn btn-outline">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              انتخاب تصویر
+            </label>
+            <button type="button" id="btnPaste" class="btn btn-outline">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+              الصاق کلیپ‌بورد
+            </button>
           </div>
-          <img id="previewImg" class="preview-img" alt="پیش‌نمایش تصویر">
+          <div class="paste-hint">می‌توانید تصویر را با کلیدهای Ctrl+V نیز الصاق کنید</div>
+
+          <input type="file" id="cameraInput" class="file-input" accept="image/*" capture="environment">
+          <input type="file" id="fileInput" class="file-input" accept="image/*">
+          <input type="text" id="hpWebsite" name="hp_website" style="display:none !important;" tabindex="-1" autocomplete="off" aria-hidden="true">
+        </div>
+
+        <!-- Rotate & crop editor -->
+        <div id="editorContainer" class="editor-container">
+          <div class="editor-title">✂️ چرخاندن و برش تصویر</div>
+          <div class="editor-hint">
+            با کشیدن روی تصویر، کادر برش را رسم کنید. گوشه‌ها و لبه‌های کادر برای تغییر اندازه و داخل کادر برای جابه‌جایی قابل کشیدن است.
+          </div>
+
+          <div class="editor-toolbar">
+            <button type="button" id="btnRotateLeft" class="btn btn-outline btn-sm">↺ چرخش به چپ</button>
+            <button type="button" id="btnRotateRight" class="btn btn-outline btn-sm">↻ چرخش به راست</button>
+            <button type="button" id="btnResetCrop" class="btn btn-outline btn-sm">⟲ حذف کادر برش</button>
+          </div>
+
+          <div class="editor-canvas-wrap">
+            <canvas id="editorCanvas"></canvas>
+          </div>
+
+          <div class="editor-meta" id="editorMeta"></div>
+
           <div class="preview-actions">
             <button id="btnSubmit" class="btn btn-success" type="button">
               <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
-              تایید و ارسال تصویر
+              تایید و ارسال برگه
             </button>
             <button id="btnRetake" class="btn btn-outline" type="button">انتخاب عکس دیگر</button>
           </div>
         </div>
+
+        <!-- Already submitted -->
+        <div id="sheetSubmitted" class="sheet-submitted">
+          <div class="sheet-submitted-icon">✅</div>
+          <div id="sheetSubmittedText">این برگه ارسال شده و در انتظار بررسی مدیر است.</div>
+        </div>
       </div>
+    </div>
+
+    <!-- Completed both sheets -->
+    <div id="completionCard" class="completion-card" style="display:none;">
+      <div class="completion-icon">🎉</div>
+      <h3>هر دو برگه شما ارسال شد. سپاسگزاریم!</h3>
+      <p id="completionText">اگر مایل به ادامه همکاری هستید، می‌توانید مجموعه جدیدی از متن‌ها دریافت کنید.</p>
+      <button type="button" id="btnNewSet" class="btn btn-primary">دریافت مجموعه جدید (۱۰ جمله + ۱۰ عدد)</button>
     </div>
 
     <div id="statsBar" class="stats-bar"></div>
@@ -143,10 +167,11 @@
       <div class="modal-header-icon">✍️</div>
       <h2>نام و نام خانوادگی</h2>
       <p class="modal-desc">
-        جهت ثبت دقیق دست‌خط و مشخص بودن ارسال‌کننده، ابتدا <strong>۲۰ جمله</strong> و پس از آن <strong>۴۰ عدد</strong> جهت نگارش به شما نمایش داده خواهد شد:
+        جهت ثبت دقیق دست‌خط و مشخص بودن ارسال‌کننده، ابتدا نام خود را وارد کنید. سپس
+        <strong>یک برگه شامل ۱۰ جمله/کلمه</strong> و <strong>یک برگه شامل ۱۰ عدد</strong> به شما نمایش داده می‌شود.
       </p>
       <div class="modal-goal-note">
-        🎯 سهمیه شما: <strong>۲۰ جمله</strong> + <strong>۴۰ عدد</strong> دست‌نویس فارسی
+        🎯 سهمیه شما: <strong>۱۰ جمله/کلمه</strong> + <strong>۱۰ عدد</strong> — فقط دو عکس
       </div>
       <form id="nameForm">
         <div class="form-group" style="text-align:right;">

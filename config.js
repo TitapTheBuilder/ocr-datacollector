@@ -11,8 +11,16 @@ module.exports = {
   UPLOAD_DIR: path.join(DATA_ROOT, 'uploads'),
   PENDING_DIR: path.join(DATA_ROOT, 'uploads', 'pending'),
   APPROVED_DIR: path.join(DATA_ROOT, 'uploads', 'approved'),
+  // Admin-drawn crops (one per written line) are written here. They live outside
+  // pending/approved because a crop's lifetime follows its parent sheet, not the
+  // pending -> approved file move.
+  SEGMENTS_DIR: path.join(DATA_ROOT, 'uploads', 'segments'),
   DB_PATH: path.join(DATA_ROOT, 'data', 'ocr-data.db'),
-  MAX_FILE_SIZE_MB: parseInt(process.env.MAX_FILE_SIZE_MB) || 2,
+  // One sheet now carries 10 handwritten lines, so it needs far more resolution
+  // than the old one-word-per-photo uploads did.
+  SENTENCES_PER_SHEET: parseInt(process.env.SENTENCES_PER_SHEET) || 10,
+  NUMBERS_PER_SHEET: parseInt(process.env.NUMBERS_PER_SHEET) || 10,
+  MAX_FILE_SIZE_MB: parseInt(process.env.MAX_FILE_SIZE_MB) || 10,
   ALLOWED_MIME_TYPES: ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'],
   SESSION_EXPIRY_MS: 24 * 60 * 60 * 1000,
   MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR: parseInt(process.env.MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR) || 100,

@@ -10,9 +10,15 @@ process.env.PERSISTENT_DATA_PATH = __dirname;
 delete process.env.CONTRIBUTOR_SECRET;
 delete process.env.ADMIN_PASSWORD_HASH;
 
-// Clean up any old test db
-if (fs.existsSync(testDbPath)) fs.unlinkSync(testDbPath);
-if (fs.existsSync(testDbPath + '.tmp')) fs.unlinkSync(testDbPath + '.tmp');
+// config.js derives DB_PATH from PERSISTENT_DATA_PATH and ignores process.env.DB_PATH,
+// so the database this run actually writes is tests/data/ocr-data.db. Clearing only
+// testDbPath left that file behind and every run started on top of the previous run's
+// contributors, hashes and sheets — which makes the duplicate-hash and prompt-exclusion
+// checks pass or fail depending on run order. Clear both.
+const realDbPath = path.join(__dirname, 'data', 'ocr-data.db');
+for (const p of [testDbPath, testDbPath + '.tmp', realDbPath, realDbPath + '.tmp']) {
+  if (fs.existsSync(p)) fs.unlinkSync(p);
+}
 
 async function runTests() {
   console.log('=== RUNNING VERIFICATION FOR ALL 14 BUGS ===\n');
@@ -78,16 +84,29 @@ async function runTests() {
   }
   assert.ok(errThrown, 'Non-existent contributorId must be rejected');
 
-  // 6c: Non-existent promptId should throw 400
+  // 6c: An image now belongs to a SHEET (assignment), not a single prompt.
   db.createContributor('contrib_ref_test', 'تست کننده', 'MoziTest');
   errThrown = false;
   try {
-    db.createImage({ filename: 'test3.jpg', contributorId: 'contrib_ref_test', promptId: 999999 });
+    db.createImage({ filename: 'test3.jpg', contributorId: 'contrib_ref_test', assignmentId: 999999 });
   } catch (err) {
     errThrown = true;
-    assert.strictEqual(err.statusCode, 400, 'Status code should be 400 for non-existent promptId');
+    assert.strictEqual(err.statusCode, 400, 'Status code should be 400 for non-existent assignmentId');
   }
-  assert.ok(errThrown, 'Non-existent promptId must be rejected');
+  assert.ok(errThrown, 'Non-existent assignmentId must be rejected');
+
+  // 6d: A sheet belonging to someone else must be refused.
+  db.createPromptsBatch(Array.from({ length: 40 }, (_, i) => `متن مرجع ${i}`), 'words');
+  db.createContributor('contrib_ref_owner', 'صاحب برگه', 'MoziTest');
+  const foreignSheet = db.createAssignment('contrib_ref_owner', 'sentences');
+  errThrown = false;
+  try {
+    db.createImage({ filename: 'test4.jpg', contributorId: 'contrib_ref_test', assignmentId: foreignSheet.id });
+  } catch (err) {
+    errThrown = true;
+    assert.strictEqual(err.statusCode, 403, 'Status code should be 403 for a sheet owned by someone else');
+  }
+  assert.ok(errThrown, "Another contributor's sheet must be rejected");
   console.log('  [PASS] Bug 6 verified: Application-level referential integrity enforced.');
 
   // --- Bug 7: createContributor 3-parameter signature ---
@@ -99,31 +118,22 @@ async function runTests() {
   assert.strictEqual(contrib.user_agent, 'Agent 1.0');
   console.log('  [PASS] Bug 7 verified: Strict 3-parameter signature stores data properly.');
 
-  // --- Bug 8: getRandomPrompt never assigns repeat prompts to contributor ---
-  console.log('Testing Bug 8: getRandomPrompt excludes all previously written prompts...');
-  const p1 = db.createPrompt('جمله تست یک', 'words');
-  const p2 = db.createPrompt('جمله تست دو', 'words');
-  const p1Id = p1.lastInsertRowid;
-  const p2Id = p2.lastInsertRowid;
-
+  // --- Bug 8: a contributor is never handed the same prompt twice ---
+  // Exclusion moved from per-request prompt draws to sheet construction: every
+  // prompt already placed on any of this contributor's sheets is skipped.
+  console.log('Testing Bug 8: sheet construction excludes prompts already assigned to the contributor...');
   const testContribId = 'contrib_prompt_test';
   db.createContributor(testContribId, 'تست متن', 'Agent');
 
-  // Record image for p1Id
-  db.createImage({
-    filename: 'p1_img.jpg',
-    contributorId: testContribId,
-    promptId: p1Id,
-    fileHash: 'hash_p1',
-  });
+  const sheetA = db.createAssignment(testContribId, 'sentences');
+  const sheetB = db.createAssignment(testContribId, 'sentences');
+  const idsA = db.getAssignmentItems(sheetA.id).map(i => i.prompt_id);
+  const idsB = db.getAssignmentItems(sheetB.id).map(i => i.prompt_id);
 
-  // Now getRandomPrompt should NOT return p1Id for testContribId
-  for (let i = 0; i < 5; i++) {
-    const prompt = db.getRandomPrompt(testContribId, 'sentences');
-    assert.ok(prompt, 'A prompt should be returned');
-    assert.notStrictEqual(prompt.id, p1Id, 'Prompt must NOT be the previously submitted p1Id');
-  }
-  console.log('  [PASS] Bug 8 verified: Previously written prompts excluded.');
+  assert.strictEqual(idsA.length, 10, 'A sheet must hold exactly 10 lines');
+  assert.strictEqual(new Set(idsA).size, 10, 'A sheet must not repeat a prompt within itself');
+  assert.ok(idsB.every(id => !idsA.includes(id)), 'A second sheet must not reuse prompts from the first');
+  console.log('  [PASS] Bug 8 verified: Previously assigned prompts excluded.');
 
   // --- Bug 11: Write-lock (JS mutex queue) around createImageSafe preventing concurrent duplicate hash race ---
   console.log('Testing Bug 11: Concurrent duplicate hash race prevention in createImageSafe...');
@@ -131,15 +141,23 @@ async function runTests() {
   db.createContributor(hashContribId, 'تست همزمانی', 'Agent');
   const sharedHash = 'identical_file_hash_999';
 
+  // Two DIFFERENT sheets, so the race is decided by the hash guard rather than by
+  // the one-image-per-sheet rule.
+  const raceSheet1 = db.createAssignment(hashContribId, 'sentences');
+  db.createPromptsBatch(Array.from({ length: 15 }, (_, i) => `${5000 + i}`), 'numbers');
+  const raceSheet2 = db.createAssignment(hashContribId, 'numbers');
+
   // Fire two concurrent inserts with the exact same file hash
   const promise1 = db.createImageSafe({
     filename: 'concurrent_1.jpg',
     contributorId: hashContribId,
+    assignmentId: raceSheet1.id,
     fileHash: sharedHash,
   });
   const promise2 = db.createImageSafe({
     filename: 'concurrent_2.jpg',
     contributorId: hashContribId,
+    assignmentId: raceSheet2.id,
     fileHash: sharedHash,
   });
 
@@ -170,11 +188,12 @@ async function runTests() {
   assert.strictEqual(csvSafeCell('متن کاملاً عادی'), 'متن کاملاً عادی');
   console.log('  [PASS] Bug 5 verified: Formula injection characters prepended with single quote.');
 
-  // --- Bug 9: Server quota check logic (20 sentences + 40 numbers = 60 total) ---
-  console.log('Testing Bug 9: Server quota logic enforcement at 60 total...');
-  assert.ok(serverCode.includes('progress.total >= 60'), 'server.js must enforce total >= 60 quota');
-  assert.ok(serverCode.includes('progress.sentences >= 20 && progress.numbers >= 40'), 'server.js must enforce stage quota');
-  console.log('  [PASS] Bug 9 verified: Server-side quota condition properly enforced.');
+  // --- Bug 9: quota is now the sheet itself (one image per open sheet) ---
+  console.log('Testing Bug 9: Server enforces one upload per open sheet...');
+  assert.ok(serverCode.includes("assignment.status !== 'open'"), 'server.js must refuse an upload to a sheet that is not open');
+  assert.ok(serverCode.includes('assignment.contributor_id !== verifiedContributorId'), 'server.js must refuse a sheet owned by someone else');
+  assert.ok(dbCode.includes("assignment.status !== 'open'"), 'database.js must re-check the open state inside the insert mutex');
+  console.log('  [PASS] Bug 9 verified: One-image-per-sheet quota enforced at both layers.');
 
   // --- Bug 12: GitHub sync force: true ---
   console.log('Testing Bug 12: GitHub sync uses force: true on ref update...');
@@ -194,19 +213,26 @@ async function runTests() {
   assert.ok(adminCode.includes('if (rejectionReason === null) return;'), 'adminAction must abort when rejectionReason is null');
   console.log('  [PASS] Bug 13 verified: Both reject handlers abort on cancel.');
 
-  // --- Bug 14: app.js always calls loadPrompt after custom text upload ---
-  console.log('Testing Bug 14: Always call loadPrompt() after upload in customMode...');
+  // --- Bug 14: the crop canvas must be sized while its container is visible ---
+  // layoutCanvas() measures the parent's clientWidth; a display:none parent reports
+  // 0 and would pin the editor to its small fallback width.
+  console.log('Testing Bug 14: editor container is shown before the canvas is measured...');
   const appCode = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
-  assert.ok(!appCode.includes("} else {\n            loadPrompt();\n          }"), 'app.js must not put loadPrompt() only in else branch');
-  console.log('  [PASS] Bug 14 verified: loadPrompt() called unconditionally after upload.');
+  const activateAt = appCode.indexOf("editorContainer.classList.add('active')");
+  assert.ok(activateAt !== -1, 'app.js must activate the editor container');
+  const layoutAt = appCode.indexOf('layoutCanvas();', activateAt);
+  assert.ok(layoutAt > activateAt, 'layoutCanvas() must run AFTER the container is made visible');
+  console.log('  [PASS] Bug 14 verified: Canvas is measured only once the editor is visible.');
 
   console.log('\n=============================================');
   console.log('🎉 ALL 14 CRITICAL & MEDIUM BUGS VERIFIED SUCCESSFULLY!');
   console.log('=============================================\n');
 
-  // Clean up test db
-  if (fs.existsSync(testDbPath)) fs.unlinkSync(testDbPath);
-  if (fs.existsSync(testDbPath + '.tmp')) fs.unlinkSync(testDbPath + '.tmp');
+  // Clean up test db (both the nominal path and the one config actually writes)
+  db.flushIfDirty();
+  for (const p of [testDbPath, testDbPath + '.tmp', realDbPath, realDbPath + '.tmp']) {
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  }
 }
 
 runTests().catch(err => {

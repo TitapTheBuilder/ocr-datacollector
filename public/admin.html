@@ -60,6 +60,10 @@
         <div class="stat-value" id="statContributors">0</div>
         <div class="stat-label">مشارکت‌کنندگان</div>
       </div>
+      <div class="stat-card approved">
+        <div class="stat-value" id="statSegments">0</div>
+        <div class="stat-label">برش‌های سطری (تایید شده)</div>
+      </div>
     </div>
 
     <!-- Storage Quota & Auto-Purge Status Bar -->
@@ -342,16 +346,53 @@
     </div>
   </div>
 
-  <!-- Image Modal -->
+  <!-- Review & Manual Segmentation Modal -->
   <div id="imageModal" class="modal-overlay">
-    <div class="modal">
+    <div class="modal modal-wide">
       <div class="modal-header">
-        <span id="modalTitle">تصویر</span>
+        <span id="modalTitle">برگه</span>
         <button class="modal-close" id="modalClose">&times;</button>
       </div>
       <div class="modal-body">
-        <img id="modalImg" src="" alt="">
-        <div id="modalInfo" style="margin-bottom:16px;"></div>
+        <div id="modalInfo" class="seg-info"></div>
+
+        <div class="seg-layout">
+          <div class="seg-canvas-col">
+            <div class="seg-toolbar">
+              <div class="seg-current">
+                <span class="seg-current-label">در حال کادرکشی سطر <strong id="segCurrentNo">—</strong>:</span>
+                <span id="segCurrentText" class="seg-current-text">—</span>
+              </div>
+              <div class="seg-toolbar-actions">
+                <label class="seg-toggle">
+                  <input type="checkbox" id="segShowBoxes" checked>
+                  نمایش کادرها
+                </label>
+                <button type="button" id="segZoomOut" class="btn btn-outline btn-sm">−</button>
+                <button type="button" id="segZoomIn" class="btn btn-outline btn-sm">+</button>
+                <button type="button" id="segZoomFit" class="btn btn-outline btn-sm">اندازه صفحه</button>
+              </div>
+            </div>
+
+            <div class="seg-canvas-wrap" id="segCanvasWrap">
+              <canvas id="segCanvas"></canvas>
+            </div>
+
+            <div class="seg-hint">
+              روی تصویر، دور متن <strong>سطر جاری</strong> یک کادر بکشید. با رها کردن ماوس، برش ذخیره و به‌طور خودکار سطر بعدی انتخاب می‌شود.
+              برای اصلاح یک سطر، آن را از لیست کناری انتخاب کنید و دوباره کادر بکشید.
+            </div>
+          </div>
+
+          <div class="seg-list-col">
+            <div class="seg-list-head">
+              <span>سطرهای این برگه</span>
+              <span id="segProgress" class="seg-progress">۰ از ۰</span>
+            </div>
+            <ol id="segList" class="seg-list"></ol>
+          </div>
+        </div>
+
         <div class="modal-actions" id="modalActions"></div>
       </div>
     </div>

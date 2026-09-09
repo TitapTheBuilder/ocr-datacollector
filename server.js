@@ -79,7 +79,7 @@ app.use('/uploads', (req, res, next) => {
 }, express.static(config.UPLOAD_DIR));
 
 // Ensure directories exist
-for (const dir of [config.PENDING_DIR, config.APPROVED_DIR]) {
+for (const dir of [config.PENDING_DIR, config.APPROVED_DIR, config.SEGMENTS_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -250,14 +250,6 @@ function requireContributor(req, res, next) {
   next();
 }
 
-function identifyContributor(req, res, next) {
-  const token = req.headers['x-contributor-token'] || req.query?.contributor_token;
-  if (token) {
-    req.contributorId = security.verifyContributorToken(token) || null;
-  }
-  next();
-}
-
 function formatContributorId(name) {
   if (!name || typeof name !== 'string') return '';
   let clean = name.trim().replace(/[\u200c\u200b\u200e\u200f\uFEFF]/g, ' ');
@@ -333,42 +325,53 @@ app.post('/api/contributors', contributorLimiter.middleware(), (req, res) => {
   }
 });
 
-// Get next prompt
-app.get('/api/prompts/next', identifyContributor, (req, res) => {
+// --- Sheets ---
+//
+// A volunteer no longer gets one prompt at a time. They get two sheets: one with
+// SENTENCES_PER_SHEET sentence/word lines and one with NUMBERS_PER_SHEET number
+// lines. Each sheet is written on a single page, line by line, and uploaded as ONE
+// image. This endpoint returns both sheets and their submission state.
+app.get('/api/sheets', requireContributor, (req, res) => {
   try {
-    const contributorId = req.contributorId || (req.query.contributor_id ? req.query.contributor_id.trim().toLowerCase() : null);
-    const category = req.query.category || null;
-    const prompt = db.getRandomPrompt(contributorId, category);
-    if (!prompt) {
-      const progress = contributorId ? db.getContributorProgress(contributorId) : null;
-      if (progress && progress.sentences >= 20) {
-        return res.status(404).json({
-          success: false,
-          error: 'سهمیه ۲۰ جمله شما تکمیل شد. متن‌های مرحله اعداد هنوز توسط مدیر سیستم اضافه نشده است. لطفاً منتظر بمانید تا مدیر فایل اعداد را بارگذاری کند.',
-        });
-      }
-      return res.status(404).json({ success: false, error: 'هیچ متنی برای نمایش وجود ندارد. لطفاً منتظر بمانید تا ادمین متن‌ها را اضافه کند.' });
-    }
-
-    let stageInfo = null;
-    if (contributorId) {
-      const progress = db.getContributorProgress(contributorId);
-      stageInfo = {
-        sentences: progress.sentences,
-        numbers: progress.numbers,
-        total: progress.total,
-        currentStage: progress.sentences < 20 ? 'sentences' : (progress.numbers < 40 ? 'numbers' : 'completed'),
-      };
-    }
-
+    db.createContributor(req.contributorId, null, req.headers['user-agent']);
+    const state = db.getContributorSheetState(req.contributorId);
+    const contributor = db.getContributor(req.contributorId);
     res.json({
-      id: prompt.id,
-      text: prompt.text,
-      category: prompt.category,
-      stageInfo,
+      success: true,
+      ...state,
+      name: contributor ? contributor.name : null,
     });
   } catch (err) {
-    console.error('[API] GET /api/prompts/next:', err.message);
+    console.error('[API] GET /api/sheets:', err.message);
+    res.status(500).json({ success: false, error: 'خطای سرور' });
+  }
+});
+
+// Ask for a fresh set of ten and ten. Only allowed once both current sheets have
+// been submitted, otherwise a volunteer could churn through the prompt bank by
+// repeatedly abandoning sheets.
+app.post('/api/sheets/new', requireContributor, (req, res) => {
+  try {
+    for (const category of db.SHEET_CATEGORIES) {
+      if (db.getOpenAssignment(req.contributorId, category)) {
+        return res.status(400).json({
+          success: false,
+          error: 'ابتدا هر دو برگه فعلی را تکمیل و ارسال کنید، سپس مجموعه جدید دریافت نمایید.',
+        });
+      }
+    }
+
+    const created = db.startNewSheetSet(req.contributorId);
+    if (created.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'متن جدیدی برای اختصاص وجود ندارد. لطفاً بعداً تلاش کنید.',
+      });
+    }
+
+    res.json({ success: true, created, ...db.getContributorSheetState(req.contributorId) });
+  } catch (err) {
+    console.error('[API] POST /api/sheets/new:', err.message);
     res.status(500).json({ success: false, error: 'خطای سرور' });
   }
 });
@@ -403,7 +406,7 @@ app.post(
       }
 
       const clientIp = security.getClientIp(req);
-      const { prompt_id, custom_text, contributor_id, contributor_token, hp_website } = req.body || {};
+      const { assignment_id, contributor_id, contributor_token, hp_website } = req.body || {};
 
       // 1. Anti-bot honeypot check
       if (hp_website) {
@@ -430,35 +433,26 @@ app.post(
         return res.status(403).json({ success: false, error: 'عدم تطابق شناسه مشارکت‌کننده با توکن معتبر.' });
       }
 
-      // 3. Strict Input Validation for prompt_id vs custom_text (Closes Finding H2)
-      let finalPromptId = null;
-      let finalCustomText = null;
-
-      if (prompt_id !== undefined && prompt_id !== null && String(prompt_id).trim() !== '') {
-        const pid = parseInt(prompt_id, 10);
-        if (isNaN(pid) || pid <= 0) {
-          fs.unlinkSync(req.file.path);
-          return res.status(400).json({ success: false, error: 'شناسه متن انتخابی نامعتبر است.' });
-        }
-        const promptRow = db.getPromptById(pid);
-        if (!promptRow || !promptRow.active) {
-          fs.unlinkSync(req.file.path);
-          return res.status(400).json({ success: false, error: 'متن انتخاب شده در سامانه فعال نیست یا یافت نشد.' });
-        }
-        finalPromptId = pid;
-      } else if (custom_text !== undefined && custom_text !== null && String(custom_text).trim() !== '') {
-        if (typeof custom_text !== 'string' || custom_text.trim().length === 0 || custom_text.trim().length > 300) {
-          fs.unlinkSync(req.file.path);
-          return res.status(400).json({ success: false, error: 'طول متن دلخواه باید بین ۱ تا ۳۰۰ کاراکتر باشد.' });
-        }
-        if (!/[\u0600-\u06FF]/.test(custom_text)) {
-          fs.unlinkSync(req.file.path);
-          return res.status(400).json({ success: false, error: 'متن یا عدد دلخواه باید شامل حروف یا ارقام فارسی باشد.' });
-        }
-        finalCustomText = custom_text.trim().replace(/[\x00-\x1f]/g, '');
-      } else {
+      // 3. The upload must name the open sheet it belongs to. Ownership and the
+      // open/submitted state are re-checked inside the insert mutex (createImage);
+      // this is the early exit that avoids keeping a doomed file on disk.
+      const assignmentId = parseInt(assignment_id, 10);
+      if (!assignment_id || isNaN(assignmentId) || assignmentId <= 0) {
         fs.unlinkSync(req.file.path);
-        return res.status(400).json({ success: false, error: 'تعیین یکی از فیلدهای prompt_id یا custom_text الزامی است.' });
+        return res.status(400).json({ success: false, error: 'شناسه برگه (assignment_id) الزامی است.' });
+      }
+      const assignment = db.getAssignment(assignmentId);
+      if (!assignment) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ success: false, error: 'برگه انتخابی در سامانه یافت نشد.' });
+      }
+      if (assignment.contributor_id !== verifiedContributorId) {
+        fs.unlinkSync(req.file.path);
+        return res.status(403).json({ success: false, error: 'این برگه متعلق به شما نیست.' });
+      }
+      if (assignment.status !== 'open') {
+        fs.unlinkSync(req.file.path);
+        return res.status(409).json({ success: false, error: 'برای این برگه قبلاً تصویری ارسال شده است.' });
       }
 
       // 4. Read file into buffer and validate Binary Magic Bytes (prevent fake files / garbage uploads)
@@ -544,25 +538,16 @@ app.post(
       const contributorName = req.body?.contributor_name ? String(req.body.contributor_name).trim() : null;
       db.createContributor(verifiedContributorId, contributorName, req.headers['user-agent']);
 
-      // 8. Server-side quota enforcement: 20 sentences + 40 numbers = 60 total (Bug 9)
-      const progress = db.getContributorProgress(verifiedContributorId);
-      if (progress.total >= 60 || (progress.sentences >= 20 && progress.numbers >= 40)) {
-        if (fs.existsSync(req.file.path)) {
-          try { fs.unlinkSync(req.file.path); } catch (_) {}
-        }
-        return res.status(403).json({
-          success: false,
-          error: 'سهمیه شما (۲۰ جمله + ۴۰ عدد) تکمیل شده است. از مشارکت شما سپاسگزاریم!',
-        });
-      }
+      // 8. Quota is now enforced by the assignment itself: one image per open sheet,
+      // and a new set of sheets is only granted once both are submitted. The
+      // open-status check above (and its re-check inside createImageSafe) IS the quota.
 
       const fileSize = cleanBuffer.length;
       // Use createImageSafe (mutex-protected) to prevent duplicate hash race (Bug 11)
       const result = await db.createImageSafe({
         filename: req.file.filename,
         originalName: req.file.originalname,
-        promptId: finalPromptId,
-        customText: finalCustomText,
+        assignmentId: assignmentId,
         contributorId: verifiedContributorId,
         mimeType: finalMime,
         fileSize: fileSize,
@@ -570,7 +555,11 @@ app.post(
         fileHash: fileHash,
       });
 
-      res.json({ success: true, image_id: result.lastInsertRowid });
+      res.json({
+        success: true,
+        image_id: result.lastInsertRowid,
+        ...db.getContributorSheetState(verifiedContributorId),
+      });
     } catch (err) {
       console.error('[API] POST /api/images:', err.message);
       if (req.file && fs.existsSync(req.file.path)) {
@@ -789,6 +778,154 @@ app.post('/api/admin/images/batch-status', requireAdmin, (req, res) => {
     res.json({ success: true, updatedCount: updatedImages.length });
   } catch (err) {
     console.error('[API] POST /api/admin/images/batch-status:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// ======================
+// MANUAL SEGMENTATION
+// ======================
+//
+// A volunteer uploads ONE page holding ten handwritten lines. The dataset needs one
+// tight image per line, labelled with the exact text that line was supposed to be.
+// The admin gets the page plus its ordered line list and drags a rectangle around
+// each line; the rectangle is stored in ORIGINAL image pixels and a crop is cut from
+// the source file with sharp. Re-drawing a line replaces its crop.
+
+// A sheet lives in pending/ before review and approved/ after, and moves between the
+// two whenever its status changes. Resolve it fresh on every crop.
+function resolveSheetPath(image) {
+  for (const dir of [config.PENDING_DIR, config.APPROVED_DIR]) {
+    const p = path.join(dir, image.filename);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function deleteSegmentFile(filename) {
+  if (!filename) return;
+  const p = path.join(config.SEGMENTS_DIR, filename);
+  if (fs.existsSync(p)) {
+    try { fs.unlinkSync(p); } catch (err) {
+      console.warn('[Segments] Could not delete crop', filename, err.message);
+    }
+  }
+}
+
+// The sheet image with its expected lines and any rectangles already drawn.
+app.get('/api/admin/images/:id/lines', requireAdmin, (req, res) => {
+  try {
+    const image = db.getImage(req.params.id);
+    if (!image) return res.status(404).json({ success: false, error: 'Image not found' });
+
+    const sheetPath = resolveSheetPath(image);
+    res.json({
+      success: true,
+      image: {
+        id: image.id,
+        filename: image.filename,
+        status: image.status,
+        sheet_category: image.sheet_category,
+        contributor_name: image.contributor_name,
+        contributor_id: image.contributor_id,
+        created_at: image.created_at,
+        rejection_reason: image.rejection_reason,
+        drive_file_id: image.drive_file_id,
+        file_missing: !sheetPath,
+      },
+      lines: db.getImageLines(image.id),
+    });
+  } catch (err) {
+    console.error('[API] GET /api/admin/images/:id/lines:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// Save (or replace) the rectangle for one line and cut its crop.
+app.post('/api/admin/images/:id/segments', requireAdmin, async (req, res) => {
+  try {
+    const image = db.getImage(req.params.id);
+    if (!image) return res.status(404).json({ success: false, error: 'Image not found' });
+
+    const lineNo = parseInt(req.body?.line_no, 10);
+    const lines = db.getImageLines(image.id);
+    const line = lines.find(l => l.line_no === lineNo);
+    if (!line) {
+      return res.status(400).json({ success: false, error: 'شماره سطر نامعتبر است.' });
+    }
+
+    const sheetPath = resolveSheetPath(image);
+    if (!sheetPath) {
+      return res.status(404).json({ success: false, error: 'فایل تصویر روی دیسک یافت نشد.' });
+    }
+
+    const meta = await sharp(sheetPath).metadata();
+    const imgW = meta.width || 0;
+    const imgH = meta.height || 0;
+
+    // Clamp the incoming box to the image: a drag that runs off the edge of the
+    // canvas must still produce a crop sharp can actually extract.
+    let x = Math.round(Number(req.body?.x));
+    let y = Math.round(Number(req.body?.y));
+    let w = Math.round(Number(req.body?.w));
+    let h = Math.round(Number(req.body?.h));
+    if ([x, y, w, h].some(v => !Number.isFinite(v))) {
+      return res.status(400).json({ success: false, error: 'مختصات کادر نامعتبر است.' });
+    }
+    x = Math.max(0, Math.min(x, imgW - 1));
+    y = Math.max(0, Math.min(y, imgH - 1));
+    w = Math.max(1, Math.min(w, imgW - x));
+    h = Math.max(1, Math.min(h, imgH - y));
+    if (w < 8 || h < 8) {
+      return res.status(400).json({ success: false, error: 'کادر انتخابی بسیار کوچک است. لطفاً کادر بزرگ‌تری بکشید.' });
+    }
+
+    const filename = `seg_${image.id}_${String(lineNo).padStart(2, '0')}_${crypto.randomBytes(6).toString('hex')}.jpg`;
+    const outPath = path.join(config.SEGMENTS_DIR, filename);
+    await sharp(sheetPath)
+      .extract({ left: x, top: y, width: w, height: h })
+      .jpeg({ quality: 92 })
+      .toFile(outPath);
+
+    const { previousFilename } = db.upsertSegment({
+      imageId: image.id,
+      promptId: line.prompt_id,
+      lineNo,
+      text: line.text,
+      x, y, w, h,
+      filename,
+    });
+
+    // Only now that the new crop is on disk and the row points at it.
+    if (previousFilename && previousFilename !== filename) deleteSegmentFile(previousFilename);
+
+    res.json({
+      success: true,
+      segment: { line_no: lineNo, text: line.text, x, y, w, h, filename },
+      segmentCount: db.countSegments(image.id),
+      totalLines: lines.length,
+    });
+  } catch (err) {
+    console.error('[API] POST /api/admin/images/:id/segments:', err.message);
+    res.status(500).json({ success: false, error: 'خطا در برش تصویر.' });
+  }
+});
+
+// Undo one line's rectangle.
+app.delete('/api/admin/images/:id/segments/:lineNo', requireAdmin, (req, res) => {
+  try {
+    const image = db.getImage(req.params.id);
+    if (!image) return res.status(404).json({ success: false, error: 'Image not found' });
+
+    const lineNo = parseInt(req.params.lineNo, 10);
+    if (isNaN(lineNo)) return res.status(400).json({ success: false, error: 'شماره سطر نامعتبر است.' });
+
+    const removed = db.deleteSegment(image.id, lineNo);
+    if (removed) deleteSegmentFile(removed.filename);
+
+    res.json({ success: true, segmentCount: db.countSegments(image.id) });
+  } catch (err) {
+    console.error('[API] DELETE /api/admin/images/:id/segments/:lineNo:', err.message);
     res.status(500).json({ success: false, error: 'Server error' });
   }
 });
@@ -1035,40 +1172,46 @@ app.post('/api/admin/github/sync', requireAdmin, async (req, res) => {
 
     const prefix = targetPath ? `${targetPath}/` : '';
 
-    // 1. Generate labels.csv
-    let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
-    for (const { img } of resolved) {
-      const fn = csvSafeCell(img.filename || '').replace(/"/g, '""');
-      const text = csvSafeCell(img.prompt_text || img.custom_text || '').replace(/"/g, '""');
-      const name = csvSafeCell(img.contributor_name || '').replace(/"/g, '""');
-      const cid = csvSafeCell(img.contributor_id || '').replace(/"/g, '""');
-      const ca = csvSafeCell(img.created_at || '').replace(/"/g, '""');
-      const did = csvSafeCell(img.drive_file_id || '').replace(/"/g, '""');
-      csv += `"${fn}","${text}","${name}","${cid}","${ca}","${did}"\n`;
+    const resolvedSegments = [];
+    for (const seg of db.getApprovedSegmentsForExport()) {
+      const segPath = path.join(config.SEGMENTS_DIR, seg.filename);
+      if (fs.existsSync(segPath)) resolvedSegments.push({ seg, segPath });
     }
+
+    // 1. Manifests: labels.csv is line-level (the training set), sheets.csv is provenance.
+    const csv = buildSegmentCsv(resolvedSegments.map(r => r.seg));
+    const sheetsCsv = buildSheetCsv(resolved.map(r => r.img));
 
     // 2. Generate README.md
     const readme = `# Persian Handwritten OCR Dataset
 مجموعه داده متن دست‌نویس فارسی جمع‌آوری‌شده توسط سامانه OCR Data Collector.
 
+هر مشارکت‌کننده دو برگه می‌نویسد (یکی جملات/کلمات و یکی اعداد) و هر برگه چند سطر دارد.
+مدیر سامانه هر سطر را به صورت دستی کادرکشی می‌کند و برش آن به همراه متن دقیقش ذخیره می‌شود.
+
 ## مشخصات مجموعه داده
-- **تعداد کل تصاویر تایید شده:** ${resolved.length}
+- **تعداد برگه‌های تایید شده:** ${resolved.length}
+- **تعداد نمونه‌های آموزشی (سطرهای برش‌خورده):** ${resolvedSegments.length}
 - **تاریخ آخرین به‌روزرسانی:** ${new Date().toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' })} (${new Date().toISOString().slice(0, 10)})
 - **پوشه‌بندی:** ${targetPath ? `\`${targetPath}/\`` : 'شاخه اصلی ریپازیتوری (Root)'}
 
 ## ساختار فایل‌ها
-- \`${prefix}labels.csv\`: جدول برچسب‌ها و مشخصات متناظر تصاویر
-- \`${prefix}images/\`: تصاویر تایید شده با کیفیت اصلی
+- \`${prefix}labels.csv\`: جدول اصلی آموزش — هر ردیف یک سطر برش‌خورده و متن آن
+- \`${prefix}segments/\`: تصاویر برش‌خورده سطرها
+- \`${prefix}sheets.csv\`: فهرست برگه‌های کامل ارسالی
+- \`${prefix}sheets/\`: تصویر کامل برگه‌ها (مرجع)
 
-## ستون‌های موجود در labels.csv
+## ستون‌های labels.csv
 | ستون | شرح |
 | :--- | :--- |
-| \`filename\` | نام فایل ذخیره شده در پوشه images |
-| \`text_label\` | متن دست‌نویس فارسی تایید شده |
+| \`filename\` | نام فایل برش‌خورده در پوشه segments |
+| \`text_label\` | متن دقیق آن سطر |
+| \`sheet_filename\` | برگه‌ای که این سطر از آن برش خورده است |
+| \`line_no\` | شماره سطر روی برگه |
+| \`category\` | \`sentences\` یا \`numbers\` |
 | \`contributor_name\` | نام و نام خانوادگی مشارکت‌کننده |
 | \`contributor_id\` | شناسه نویسنده |
-| \`created_at\` | تاریخ و زمان بارگذاری |
-| \`drive_file_id\` | شناسه در گوگل درایو (در صورت همگام‌سازی) |
+| \`created_at\` | تاریخ و زمان بارگذاری برگه |
 `;
 
     // 3. Assemble files array
@@ -1079,21 +1222,34 @@ app.post('/api/admin/github/sync', requireAdmin, async (req, res) => {
         isBinary: false,
       },
       {
+        path: `${prefix}sheets.csv`,
+        content: '\uFEFF' + sheetsCsv,
+        isBinary: false,
+      },
+      {
         path: `${prefix}README.md`,
         content: readme,
         isBinary: false,
       },
     ];
 
+    for (const { seg, segPath } of resolvedSegments) {
+      files.push({
+        path: `${prefix}segments/${seg.filename}`,
+        diskPath: segPath,
+        isBinary: true,
+      });
+    }
+
     for (const { img, filePath } of resolved) {
       files.push({
-        path: `${prefix}images/${img.filename}`,
+        path: `${prefix}sheets/${img.filename}`,
         diskPath: filePath,
         isBinary: true,
       });
     }
 
-    const commitMessage = req.body?.message || `Update Persian OCR dataset: ${resolved.length} approved images`;
+    const commitMessage = req.body?.message || `Update Persian OCR dataset: ${resolvedSegments.length} line crops from ${resolved.length} sheets`;
 
     const result = await githubSync.commitDataset({
       token,
@@ -1110,6 +1266,7 @@ app.post('/api/admin/github/sync', requireAdmin, async (req, res) => {
       commitSha: result.commitSha,
       branch: result.branch,
       imageCount: resolved.length,
+      segmentCount: resolvedSegments.length,
       fileCount: files.length,
     });
   } catch (err) {
@@ -1204,19 +1361,47 @@ app.delete('/api/admin/prompts/:id', requireAdmin, (req, res) => {
 });
 
 // Export approved images as CSV manifest
+// --- Dataset manifests ---
+//
+// The training set is the SEGMENTS: one cropped line paired with its exact label.
+// The full sheets are kept alongside as provenance, in their own manifest, because
+// a sheet has ten labels and cannot be a row in a filename->label table.
+const SEGMENT_CSV_HEADER = 'filename,text_label,sheet_filename,line_no,category,contributor_name,contributor_id,created_at\n';
+const SHEET_CSV_HEADER = 'filename,category,line_count,segment_count,contributor_name,contributor_id,created_at,drive_file_id\n';
+
+// `v || ''` would blank out a legitimate 0 in the count columns, so only null and
+// undefined become empty cells.
+function csvRow(values) {
+  return values
+    .map(v => `"${csvSafeCell(v === null || v === undefined ? '' : v).replace(/"/g, '""')}"`)
+    .join(',') + '\n';
+}
+
+function buildSegmentCsv(segments) {
+  let csv = SEGMENT_CSV_HEADER;
+  for (const seg of segments) {
+    csv += csvRow([
+      seg.filename, seg.text, seg.sheet_filename, seg.line_no,
+      seg.sheet_category || 'sentences', seg.contributor_name, seg.contributor_id, seg.created_at,
+    ]);
+  }
+  return csv;
+}
+
+function buildSheetCsv(images) {
+  let csv = SHEET_CSV_HEADER;
+  for (const img of images) {
+    csv += csvRow([
+      img.filename, img.sheet_category || 'legacy', img.line_count, img.segment_count,
+      img.contributor_name, img.contributor_id, img.created_at, img.drive_file_id,
+    ]);
+  }
+  return csv;
+}
+
 app.get('/api/admin/export', requireAdmin, (req, res) => {
   try {
-    const images = db.getApprovedForExport();
-    let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
-    for (const img of images) {
-      const fn = csvSafeCell(img.filename || '').replace(/"/g, '""');
-      const text = csvSafeCell(img.prompt_text || img.custom_text || '').replace(/"/g, '""');
-      const name = csvSafeCell(img.contributor_name || '').replace(/"/g, '""');
-      const cid = csvSafeCell(img.contributor_id || '').replace(/"/g, '""');
-      const ca = csvSafeCell(img.created_at || '').replace(/"/g, '""');
-      const did = csvSafeCell(img.drive_file_id || '').replace(/"/g, '""');
-      csv += `"${fn}","${text}","${name}","${cid}","${ca}","${did}"\n`;
-    }
+    const csv = buildSegmentCsv(db.getApprovedSegmentsForExport());
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename=ocr_labels.csv');
     res.send('﻿' + csv); // BOM for Excel compatibility
@@ -1267,7 +1452,7 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
     archive.pipe(res);
 
     // Resolve each record to a file on disk FIRST. A row whose file is missing must
-    // not reach labels.csv, otherwise the manifest points at images the ZIP does not
+    // not reach a manifest, otherwise the CSV points at images the ZIP does not
     // contain and any loader reading it fails on the missing path.
     const resolved = [];
     for (const img of images) {
@@ -1282,33 +1467,45 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
       }
     }
 
-    // 1. Generate labels.csv manifest with BOM
-    let csv = 'filename,text_label,contributor_name,contributor_id,created_at,drive_file_id\n';
-    for (const { img } of resolved) {
-      const fn = csvSafeCell(img.filename || '').replace(/"/g, '""');
-      const text = csvSafeCell(img.prompt_text || img.custom_text || '').replace(/"/g, '""');
-      const name = csvSafeCell(img.contributor_name || '').replace(/"/g, '""');
-      const cid = csvSafeCell(img.contributor_id || '').replace(/"/g, '""');
-      const ca = csvSafeCell(img.created_at || '').replace(/"/g, '""');
-      const did = csvSafeCell(img.drive_file_id || '').replace(/"/g, '""');
-      csv += `"${fn}","${text}","${name}","${cid}","${ca}","${did}"\n`;
+    const resolvedSegments = [];
+    for (const seg of db.getApprovedSegmentsForExport()) {
+      const segPath = path.join(config.SEGMENTS_DIR, seg.filename);
+      if (fs.existsSync(segPath)) {
+        resolvedSegments.push({ seg, segPath });
+      } else {
+        console.warn(`[API] export-zip: skipping segment ${seg.filename} (file not found on disk)`);
+      }
     }
-    archive.append('\uFEFF' + csv, { name: 'labels.csv' });
 
-    // 2. Generate README.txt
-    const readme = `دیتاست OCR دستنویس فارسی
-مجموع تصاویر تایید شده: ${resolved.length}
+    // 1. labels.csv — the training manifest: one cropped line per row.
+    archive.append('\uFEFF' + buildSegmentCsv(resolvedSegments.map(r => r.seg)), { name: 'labels.csv' });
+
+    // 2. sheets.csv — provenance for the full uploaded pages.
+    archive.append('\uFEFF' + buildSheetCsv(resolved.map(r => r.img)), { name: 'sheets.csv' });
+
+    // 3. README.txt
+    const readme = `دیتاست OCR دست‌نویس فارسی
+تعداد برگه‌های تایید شده: ${resolved.length}
+تعداد برش‌های سطری (نمونه‌های آموزشی): ${resolvedSegments.length}
 تاریخ دریافت خروجی: ${new Date().toLocaleString('fa-IR')}
 
 محتوای فایل زیپ:
-1. labels.csv : جدول برچسب‌ها، متن متناظر و مشخصات تصاویر (سازگار با Excel و Python Pandas)
-2. پوشه images/ : شامل فایل‌های تصاویر تایید شده با کیفیت اصلی
+1. labels.csv  : جدول اصلی آموزش — هر ردیف یک تصویر برش‌خورده از یک سطر به همراه متن دقیق آن
+2. پوشه segments/ : تصاویر برش‌خورده سطرها (ورودی آموزش مدل)
+3. sheets.csv  : فهرست برگه‌های کامل ارسالی و تعداد سطرهای برش‌خورده هر برگه
+4. پوشه sheets/   : تصویر کامل برگه‌های تایید شده (مرجع و بازبینی)
+
+نکته: هر برگه شامل چند سطر دست‌نویس است. برچسب‌گذاری در سطح سطر انجام می‌شود،
+بنابراین فایل labels.csv و پوشه segments/ منبع اصلی آموزش مدل هستند.
 `;
     archive.append(readme, { name: 'README.txt' });
 
-    // 3. Append images (exactly the rows written to labels.csv)
+    // 4. Append the files behind exactly the rows written above.
+    for (const { seg, segPath } of resolvedSegments) {
+      archive.file(segPath, { name: `segments/${seg.filename}` });
+    }
     for (const { img, filePath } of resolved) {
-      archive.file(filePath, { name: `images/${img.filename}` });
+      archive.file(filePath, { name: `sheets/${img.filename}` });
     }
 
     await archive.finalize();

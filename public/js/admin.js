@@ -13,6 +13,7 @@
   const statRejected = document.getElementById('statRejected');
   const statSynced = document.getElementById('statSynced');
   const statContributors = document.getElementById('statContributors');
+  const statSegments = document.getElementById('statSegments');
 
   // Tabs
   const tabs = document.querySelectorAll('.tab');
@@ -75,7 +76,6 @@
 
   // Modal
   const imageModal = document.getElementById('imageModal');
-  const modalImg = document.getElementById('modalImg');
   const modalTitle = document.getElementById('modalTitle');
   const modalInfo = document.getElementById('modalInfo');
   const modalActions = document.getElementById('modalActions');
@@ -152,6 +152,7 @@
       statRejected.textContent = s.rejected;
       statSynced.textContent = s.synced;
       statContributors.textContent = s.contributors;
+      if (statSegments) statSegments.textContent = s.segmentsApproved ?? 0;
 
       loadStorageStats();
     } catch {
@@ -291,8 +292,9 @@
         </div>
         <img src="${imageUrl(img)}" alt="" loading="lazy" onerror="imgFallback(this)">
         <div class="image-card-info">
-          <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
+          <div class="prompt-text">${sheetLabel(img)}</div>
           <div class="meta">
+            <div>${segmentBadge(img)}</div>
             <div>نویسنده: <strong style="color:var(--gray-900);">${authorName}</strong></div>
             <div style="font-size:0.75rem; color:var(--gray-500); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="شناسه: ${authorId}">شناسه: ${authorId}</div>
             <div>${formatDate(img.created_at)}</div>
@@ -440,52 +442,433 @@
     });
   }
 
-  // --- Modal ---
+  // --- Review & manual segmentation workspace ---
+  //
+  // A volunteer uploads ONE page holding ten handwritten lines. The dataset needs
+  // one tight crop per line, labelled with the exact text that line was meant to be.
+  // The admin drags a rectangle around the current line; on pointerup the box is
+  // posted, the server cuts the crop with sharp, and the next unfinished line is
+  // selected automatically. Boxes are stored in ORIGINAL image pixels, so the on
+  // screen scale (zoom, window size) never leaks into the saved data.
+
+  const segCanvas = document.getElementById('segCanvas');
+  const segCanvasWrap = document.getElementById('segCanvasWrap');
+  const segList = document.getElementById('segList');
+  const segProgress = document.getElementById('segProgress');
+  const segCurrentNo = document.getElementById('segCurrentNo');
+  const segCurrentText = document.getElementById('segCurrentText');
+  const segShowBoxes = document.getElementById('segShowBoxes');
+  const segZoomIn = document.getElementById('segZoomIn');
+  const segZoomOut = document.getElementById('segZoomOut');
+  const segZoomFit = document.getElementById('segZoomFit');
+
+  const SEG_MIN_DRAG = 8; // display px below which a drag is treated as a stray tap
+
+  const seg = {
+    image: null,      // the current sheet as an HTMLImageElement
+    imageEl: null,
+    data: null,       // { image, lines } from /lines
+    activeLine: null,
+    scale: 1,
+    fitScale: 1,
+    drag: null,
+    preview: null,    // rectangle being dragged, in image pixels
+    busy: false,
+  };
+
+  function segReset() {
+    seg.image = null;
+    seg.data = null;
+    seg.activeLine = null;
+    seg.drag = null;
+    seg.preview = null;
+    seg.busy = false;
+  }
+
   async function openModal(imageId) {
     try {
-      const res = await fetch(`/api/admin/images/${imageId}`);
-      if (!res.ok) return;
-      const img = await res.json();
-      if (!img) return;
+      const res = await fetch(`/api/admin/images/${imageId}/lines`);
+      if (!res.ok) {
+        alert('خطا در دریافت اطلاعات برگه.');
+        return;
+      }
+      const data = await res.json();
+      if (!data.success) return;
 
-      modalTitle.textContent = `تصویر #${img.id}`;
-      modalImg.onerror = () => window.imgFallback(modalImg);
-      delete modalImg.dataset.fallbackTried;
-      modalImg.src = imageUrl(img);
+      segReset();
+      seg.data = data;
 
+      const img = data.image;
+      const categoryLabel = img.sheet_category === 'numbers'
+        ? 'برگه اعداد'
+        : (img.sheet_category ? 'برگه جملات و کلمات' : 'ارسال قدیمی');
+
+      modalTitle.textContent = `برگه #${img.id} — ${categoryLabel}`;
       modalInfo.innerHTML = `
-        <p><strong>متن:</strong> ${escapeHtml(img.prompt_text || img.custom_text || '—')}</p>
-        <p><strong>دسته:</strong> ${escapeHtml(img.prompt_category || '—')}</p>
-        <p><strong>نام و نام خانوادگی نویسنده:</strong> <strong style="color:var(--primary);">${escapeHtml(img.contributor_name || 'ثبت نشده')}</strong></p>
-        <p><strong>شناسه نویسنده (ID):</strong> <code>${escapeHtml(img.contributor_id || '—')}</code></p>
-        <p><strong>تاریخ ارسال:</strong> ${escapeHtml(formatDate(img.created_at))}</p>
-        <p><strong>وضعیت:</strong> <span class="status-badge ${escapeHtml(img.status)}">${statusLabel(img.status)}</span></p>
-        ${img.rejection_reason ? `<p><strong>دلیل رد:</strong> ${escapeHtml(img.rejection_reason)}</p>` : ''}
-        ${img.drive_file_id ? `<p><strong>Drive ID:</strong> ${escapeHtml(img.drive_file_id)}</p>` : ''}
+        <div><strong>نویسنده:</strong> <span style="color:var(--primary);">${escapeHtml(img.contributor_name || 'ثبت نشده')}</span>
+             <code style="font-size:0.78rem; color:var(--gray-500);">${escapeHtml(img.contributor_id || '—')}</code></div>
+        <div><strong>تاریخ:</strong> ${escapeHtml(formatDate(img.created_at))}</div>
+        <div><strong>وضعیت:</strong> <span class="status-badge ${escapeHtml(img.status)}">${statusLabel(img.status)}</span></div>
+        ${img.rejection_reason ? `<div><strong>دلیل رد:</strong> ${escapeHtml(img.rejection_reason)}</div>` : ''}
+        ${img.drive_file_id ? `<div><strong>Drive ID:</strong> ${escapeHtml(img.drive_file_id)}</div>` : ''}
+        ${img.file_missing ? `<div style="color:var(--danger); font-weight:600;">⚠️ فایل تصویر روی سرور یافت نشد.</div>` : ''}
       `;
 
-      let actionsHtml = '';
-      if (img.status === 'pending') {
-        actionsHtml = `
-          <button class="btn btn-success" onclick="adminAction(${img.id}, 'approved')">تایید</button>
-          <button class="btn btn-danger" onclick="adminAction(${img.id}, 'rejected')">رد کردن</button>
-        `;
-      } else if (img.status === 'approved' && !img.drive_file_id) {
-        actionsHtml = `
-          <button class="btn btn-primary" onclick="syncSingle(${img.id})">همگام‌سازی با درایو</button>
-        `;
-      }
-      modalActions.innerHTML = actionsHtml;
-
+      renderModalActions(img);
+      renderSegList();
       imageModal.classList.add('active');
+
+      if (!img.file_missing) {
+        loadSegImage(img);
+      }
     } catch (err) {
-      console.error('Error opening image modal:', err);
+      console.error('Error opening review modal:', err);
     }
   }
 
-  modalClose.addEventListener('click', () => imageModal.classList.remove('active'));
+  function loadSegImage(img) {
+    const folder = img.status === 'approved' ? 'approved' : 'pending';
+    const el = new Image();
+    el.onload = () => {
+      seg.image = el;
+      segFit();
+      segDraw();
+    };
+    // Status and folder can drift if a file move ever failed; try the other folder
+    // once before giving up, so review is never blocked by that drift.
+    el.onerror = () => {
+      if (el.dataset.retried) return;
+      el.dataset.retried = '1';
+      el.src = `/uploads/${folder === 'approved' ? 'pending' : 'approved'}/${encodeURIComponent(img.filename)}`;
+    };
+    el.src = `/uploads/${folder}/${encodeURIComponent(img.filename)}`;
+  }
+
+  function segFit() {
+    if (!seg.image) return;
+    const available = (segCanvasWrap.clientWidth || 640) - 16;
+    seg.fitScale = Math.min(1, available / seg.image.naturalWidth);
+    seg.scale = seg.fitScale;
+    segResizeCanvas();
+  }
+
+  function segResizeCanvas() {
+    if (!seg.image) return;
+    segCanvas.width = Math.max(1, Math.round(seg.image.naturalWidth * seg.scale));
+    segCanvas.height = Math.max(1, Math.round(seg.image.naturalHeight * seg.scale));
+  }
+
+  function segZoom(factor) {
+    if (!seg.image) return;
+    seg.scale = Math.max(0.05, Math.min(4, seg.scale * factor));
+    segResizeCanvas();
+    segDraw();
+  }
+
+  if (segZoomIn) segZoomIn.addEventListener('click', () => segZoom(1.25));
+  if (segZoomOut) segZoomOut.addEventListener('click', () => segZoom(0.8));
+  if (segZoomFit) segZoomFit.addEventListener('click', () => { segFit(); segDraw(); });
+  if (segShowBoxes) segShowBoxes.addEventListener('change', segDraw);
+
+  function segDraw() {
+    if (!seg.image || !segCanvas.width) return;
+    const ctx = segCanvas.getContext('2d');
+    const s = seg.scale;
+    ctx.clearRect(0, 0, segCanvas.width, segCanvas.height);
+    ctx.drawImage(seg.image, 0, 0, segCanvas.width, segCanvas.height);
+
+    if (segShowBoxes && segShowBoxes.checked && seg.data) {
+      for (const line of seg.data.lines) {
+        if (!line.segment) continue;
+        const isActive = line.line_no === seg.activeLine;
+        const x = line.segment.x * s, y = line.segment.y * s;
+        const w = line.segment.w * s, h = line.segment.h * s;
+
+        ctx.strokeStyle = isActive ? '#dc2626' : '#16a34a';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, w, h);
+        ctx.fillStyle = isActive ? 'rgba(220,38,38,0.14)' : 'rgba(22,163,74,0.10)';
+        ctx.fillRect(x, y, w, h);
+
+        // Line number badge, kept inside the canvas for boxes drawn at the top edge.
+        const badgeY = y < 20 ? y + 4 : y - 18;
+        ctx.fillStyle = isActive ? '#dc2626' : '#16a34a';
+        ctx.fillRect(x, badgeY, 26, 16);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(line.line_no), x + 13, badgeY + 8);
+      }
+    }
+
+    if (seg.preview) {
+      const p = seg.preview;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = '#2563eb';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(p.x * s, p.y * s, p.w * s, p.h * s);
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(37,99,235,0.14)';
+      ctx.fillRect(p.x * s, p.y * s, p.w * s, p.h * s);
+    }
+  }
+
+  function segPoint(e) {
+    const rect = segCanvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (segCanvas.width / rect.width),
+      y: (e.clientY - rect.top) * (segCanvas.height / rect.height),
+    };
+  }
+
+  segCanvas.addEventListener('pointerdown', (e) => {
+    if (!seg.image || seg.busy || seg.activeLine === null) return;
+    segCanvas.setPointerCapture(e.pointerId);
+    const p = segPoint(e);
+    seg.drag = { startDisplay: p, anchor: { x: p.x / seg.scale, y: p.y / seg.scale } };
+    seg.preview = null;
+  });
+
+  segCanvas.addEventListener('pointermove', (e) => {
+    if (!seg.drag) return;
+    const p = segPoint(e);
+    const bx = p.x / seg.scale;
+    const by = p.y / seg.scale;
+    seg.preview = {
+      x: Math.min(seg.drag.anchor.x, bx),
+      y: Math.min(seg.drag.anchor.y, by),
+      w: Math.abs(bx - seg.drag.anchor.x),
+      h: Math.abs(by - seg.drag.anchor.y),
+    };
+    segDraw();
+  });
+
+  async function segEndDrag(e) {
+    if (!seg.drag) return;
+    const startDisplay = seg.drag.startDisplay;
+    seg.drag = null;
+    if (e && e.pointerId !== undefined && segCanvas.hasPointerCapture(e.pointerId)) {
+      segCanvas.releasePointerCapture(e.pointerId);
+    }
+
+    const box = seg.preview;
+    seg.preview = null;
+
+    // A click without a real drag should not save a one-pixel crop.
+    if (!box || box.w * seg.scale < SEG_MIN_DRAG || box.h * seg.scale < SEG_MIN_DRAG) {
+      segDraw();
+      return;
+    }
+
+    await saveSegment(seg.activeLine, box);
+  }
+
+  segCanvas.addEventListener('pointerup', segEndDrag);
+  segCanvas.addEventListener('pointercancel', () => { seg.drag = null; seg.preview = null; segDraw(); });
+
+  async function saveSegment(lineNo, box) {
+    if (!seg.data) return;
+    seg.busy = true;
+    segCanvas.classList.add('busy');
+    try {
+      const res = await fetch(`/api/admin/images/${seg.data.image.id}/segments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          line_no: lineNo,
+          x: Math.round(box.x),
+          y: Math.round(box.y),
+          w: Math.round(box.w),
+          h: Math.round(box.h),
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        alert(data.error || 'خطا در ذخیره برش.');
+        return;
+      }
+
+      const line = seg.data.lines.find(l => l.line_no === lineNo);
+      if (line) line.segment = data.segment;
+
+      selectNextUnsegmentedLine();
+      renderSegList();
+      renderModalActions(seg.data.image);
+      segDraw();
+      loadStats();
+    } catch (err) {
+      alert('خطا در ارتباط با سرور: ' + err.message);
+    } finally {
+      seg.busy = false;
+      segCanvas.classList.remove('busy');
+    }
+  }
+
+  async function deleteSegmentLine(lineNo) {
+    if (!seg.data) return;
+    try {
+      const res = await fetch(`/api/admin/images/${seg.data.image.id}/segments/${lineNo}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!data.success) {
+        alert(data.error || 'خطا در حذف برش.');
+        return;
+      }
+      const line = seg.data.lines.find(l => l.line_no === lineNo);
+      if (line) line.segment = null;
+      seg.activeLine = lineNo;
+      renderSegList();
+      renderModalActions(seg.data.image);
+      segDraw();
+      loadStats();
+    } catch (err) {
+      alert('خطا در ارتباط با سرور: ' + err.message);
+    }
+  }
+
+  function selectNextUnsegmentedLine() {
+    if (!seg.data) return;
+    const lines = seg.data.lines;
+    const startIndex = lines.findIndex(l => l.line_no === seg.activeLine);
+    // Look forward from the current line first, then wrap, so the admin walks the
+    // page top to bottom instead of jumping back to an earlier gap every time.
+    for (let i = 1; i <= lines.length; i++) {
+      const line = lines[(startIndex + i + lines.length) % lines.length];
+      if (!line.segment) {
+        seg.activeLine = line.line_no;
+        return;
+      }
+    }
+    seg.activeLine = null; // everything is segmented
+  }
+
+  function setActiveLine(lineNo) {
+    seg.activeLine = lineNo;
+    renderSegList();
+    segDraw();
+  }
+
+  function renderSegList() {
+    if (!seg.data) {
+      segList.innerHTML = '';
+      return;
+    }
+    const lines = seg.data.lines;
+    const done = lines.filter(l => l.segment).length;
+
+    if (seg.activeLine === null && done < lines.length) {
+      const firstOpen = lines.find(l => !l.segment);
+      if (firstOpen) seg.activeLine = firstOpen.line_no;
+    }
+
+    segProgress.textContent = `${done} از ${lines.length}`;
+    segProgress.className = 'seg-progress' + (done === lines.length && lines.length > 0 ? ' complete' : '');
+
+    const activeLine = lines.find(l => l.line_no === seg.activeLine);
+    segCurrentNo.textContent = activeLine ? activeLine.line_no : '—';
+    segCurrentText.textContent = activeLine ? activeLine.text : 'همه سطرها کادرکشی شده‌اند ✓';
+    segCurrentText.classList.toggle('done', !activeLine);
+
+    segList.innerHTML = '';
+    for (const line of lines) {
+      const li = document.createElement('li');
+      li.className = 'seg-line'
+        + (line.segment ? ' done' : '')
+        + (line.line_no === seg.activeLine ? ' active' : '');
+
+      const no = document.createElement('span');
+      no.className = 'seg-line-no';
+      no.textContent = line.line_no;
+
+      const body = document.createElement('div');
+      body.className = 'seg-line-body';
+
+      const text = document.createElement('div');
+      text.className = 'seg-line-text';
+      text.textContent = line.text;
+      body.appendChild(text);
+
+      if (line.segment && line.segment.filename) {
+        const thumb = document.createElement('img');
+        thumb.className = 'seg-line-thumb';
+        thumb.loading = 'lazy';
+        thumb.alt = '';
+        thumb.src = `/uploads/segments/${encodeURIComponent(line.segment.filename)}`;
+        body.appendChild(thumb);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'seg-line-actions';
+
+      if (line.segment) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'seg-line-btn danger';
+        del.textContent = 'حذف کادر';
+        del.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteSegmentLine(line.line_no);
+        });
+        actions.appendChild(del);
+      } else {
+        const mark = document.createElement('span');
+        mark.className = 'seg-line-pending';
+        mark.textContent = 'کادرکشی نشده';
+        actions.appendChild(mark);
+      }
+
+      li.appendChild(no);
+      li.appendChild(body);
+      li.appendChild(actions);
+      li.addEventListener('click', () => setActiveLine(line.line_no));
+      segList.appendChild(li);
+    }
+  }
+
+  function renderModalActions(img) {
+    const lines = seg.data ? seg.data.lines : [];
+    const done = lines.filter(l => l.segment).length;
+    const total = lines.length;
+
+    let html = '';
+    if (img.status === 'pending') {
+      html += `<button class="btn btn-success" onclick="adminAction(${img.id}, 'approved')">تایید برگه</button>
+               <button class="btn btn-danger" onclick="adminAction(${img.id}, 'rejected')">رد کردن</button>`;
+    } else if (img.status === 'approved') {
+      html += `<button class="btn btn-danger" onclick="adminAction(${img.id}, 'rejected')">رد کردن</button>`;
+      if (!img.drive_file_id) {
+        html += `<button class="btn btn-primary" onclick="syncSingle(${img.id})">همگام‌سازی با درایو</button>`;
+      }
+    } else if (img.status === 'rejected') {
+      html += `<button class="btn btn-success" onclick="adminAction(${img.id}, 'approved')">تایید برگه</button>`;
+    }
+
+    // Segmentation is deliberately not a gate on approval, but an approved sheet
+    // with unsegmented lines contributes nothing to the dataset, so say so.
+    if (total > 0 && done < total) {
+      html += `<span class="seg-warn">⚠️ ${total - done} سطر هنوز کادرکشی نشده است — این سطرها وارد دیتاست نمی‌شوند.</span>`;
+    } else if (total > 0) {
+      html += `<span class="seg-ok">✓ هر ${total} سطر کادرکشی شد.</span>`;
+    }
+
+    modalActions.innerHTML = html;
+  }
+
+  window.addEventListener('resize', () => {
+    if (imageModal.classList.contains('active') && seg.image) {
+      segFit();
+      segDraw();
+    }
+  });
+
+  function closeReviewModal() {
+    imageModal.classList.remove('active');
+    segReset();
+  }
+
+  modalClose.addEventListener('click', closeReviewModal);
   imageModal.addEventListener('click', (e) => {
-    if (e.target === imageModal) imageModal.classList.remove('active');
+    if (e.target === imageModal) closeReviewModal();
   });
 
   // --- Admin actions (global for onclick) ---
@@ -504,7 +887,7 @@
       });
       const data = await res.json();
       if (data.success) {
-        imageModal.classList.remove('active');
+        closeReviewModal();
         loadStats();
         loadPending();
         loadAll();
@@ -520,7 +903,7 @@
       const data = await res.json();
       if (data.success) {
         alert('همگام‌سازی موفقیت‌آمیز بود!');
-        imageModal.classList.remove('active');
+        closeReviewModal();
         loadStats();
         loadSync();
       } else {
@@ -915,7 +1298,7 @@
         <div class="image-card" data-id="${img.id}">
           <img src="${imageUrl(img)}" alt="" loading="lazy" onerror="imgFallback(this)">
           <div class="image-card-info">
-            <div class="prompt-text">${escapeHtml(img.prompt_text || img.custom_text || '—')}</div>
+            <div class="prompt-text">${sheetLabel(img)}</div>
             <div class="meta">
               <div>نویسنده: <strong>${escapeHtml(img.contributor_name || 'ثبت نشده')}</strong> <span style="font-size:0.75rem; color:var(--gray-500);">(${escapeHtml(img.contributor_id || '')})</span></div>
               <div>${formatDate(img.created_at)}</div>
@@ -957,6 +1340,22 @@
     selectedAll.clear();
     loadAll();
   });
+
+  // A card no longer shows one prompt: a sheet holds many lines, so it shows what
+  // kind of sheet it is and how much of it the admin has already cropped.
+  function sheetLabel(img) {
+    if (img.sheet_category === 'numbers') return '🔢 برگه اعداد';
+    if (img.sheet_category) return '📝 برگه جملات و کلمات';
+    return escapeHtml(img.prompt_text || img.custom_text || 'ارسال قدیمی');
+  }
+
+  function segmentBadge(img) {
+    const total = img.line_count || 0;
+    const done = img.segment_count || 0;
+    if (!total) return '';
+    const cls = done >= total ? 'seg-badge complete' : (done > 0 ? 'seg-badge partial' : 'seg-badge none');
+    return `<span class="${cls}">برش سطرها: ${done} از ${total}</span>`;
+  }
 
   // --- Helpers ---
 
