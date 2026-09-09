@@ -1521,12 +1521,12 @@ app.get('/api/admin/export-zip', requireAdmin, async (req, res) => {
 app.get('/api/admin/storage-stats', requireAdmin, (req, res) => {
   try {
     const usedBytes = security.getStorageUsageBytes();
-    const maxBytes = (config.MAX_STORAGE_MB || 1000) * 1024 * 1024;
+    const maxBytes = (config.MAX_STORAGE_MB || 51200) * 1024 * 1024;
     const pendingCount = db.getPendingCount();
     res.json({
       usedBytes,
       usedMB: Math.round(usedBytes / (1024 * 1024) * 10) / 10,
-      maxMB: config.MAX_STORAGE_MB || 1000,
+      maxMB: config.MAX_STORAGE_MB || 51200,
       percent: Math.min(100, Math.round((usedBytes / maxBytes) * 1000) / 10),
       pendingCount,
       maxPending: config.MAX_PENDING_IMAGES || 2000,

@@ -26,7 +26,7 @@ module.exports = {
   MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR: parseInt(process.env.MAX_UPLOADS_PER_CONTRIBUTOR_PER_HOUR) || 100,
   MAX_UPLOADS_PER_IP_PER_HOUR: parseInt(process.env.MAX_UPLOADS_PER_IP_PER_HOUR) || 100,
   MAX_UPLOADS_PER_IP_PER_MINUTE: parseInt(process.env.MAX_UPLOADS_PER_IP_PER_MINUTE) || 20,
-  MAX_STORAGE_MB: parseInt(process.env.MAX_STORAGE_MB) || 1000, // 1GB hard stop
+  MAX_STORAGE_MB: parseInt(process.env.MAX_STORAGE_MB) || 51200, // 50GB hard stop
   MAX_PENDING_IMAGES: parseInt(process.env.MAX_PENDING_IMAGES) || 2000,
   REJECTED_RETENTION_MS: 60 * 1000, // Auto-delete rejected images after 1 minute (60s)
   GOOGLE_SERVICE_ACCOUNT_PATH: path.resolve(process.env.GOOGLE_SERVICE_ACCOUNT_PATH || path.join(__dirname, 'google-service-account.json')),

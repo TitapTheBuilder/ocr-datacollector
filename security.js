@@ -213,7 +213,7 @@ function getStorageUsageBytes() {
 // Storage Quota Guard Middleware
 function storageQuotaGuard(db) {
   return (req, res, next) => {
-    const maxBytes = (config.MAX_STORAGE_MB || 1000) * 1024 * 1024;
+    const maxBytes = (config.MAX_STORAGE_MB || 51200) * 1024 * 1024;
     const currentBytes = getStorageUsageBytes();
 
     if (currentBytes >= maxBytes) {
