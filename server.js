@@ -812,6 +812,127 @@ function deleteSegmentFile(filename) {
   }
 }
 
+// --- Segment geometry ---
+//
+// Volunteers do not write in perfectly straight lines, so a line's shape is four
+// draggable corners rather than an axis-aligned box, and the admin can paint over
+// bits of the neighbouring lines that still leak in. Neither touches the uploaded
+// sheet: the crop is re-cut from the original every time, and the shape mask plus
+// the erase strokes are painted on top of that copy in the paper colour.
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+const MAX_ERASE_STROKES = 400;
+const MAX_ERASE_POINTS = 4000;
+
+// Coerce to a finite, rounded number or throw — nothing unchecked may reach the SVG.
+//
+// Deliberately strict rather than leaning on Number(): Number(null) and Number('')
+// are both 0, so a malformed corner would silently become a valid-looking (0, 0)
+// instead of being rejected. JSON has no Infinity either — it serialises as null —
+// so null has to be an error, not a zero.
+function svgNum(value) {
+  const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (typeof n !== 'number' || !Number.isFinite(n)) {
+    throw Object.assign(new Error('BAD_GEOMETRY'), { statusCode: 400 });
+  }
+  return Math.round(n);
+}
+
+function parseQuad(raw, fallback) {
+  if (!Array.isArray(raw) || raw.length !== 4) return fallback;
+  const quad = raw.map(p => {
+    if (!Array.isArray(p) || p.length !== 2) throw Object.assign(new Error('BAD_GEOMETRY'), { statusCode: 400 });
+    return [svgNum(p[0]), svgNum(p[1])];
+  });
+  return quad;
+}
+
+// Erase strokes are admin input; keep only shapes we know how to draw, with sane
+// sizes, so a malformed payload can never produce unbounded SVG.
+function parseErase(raw) {
+  if (!Array.isArray(raw)) return [];
+  const strokes = [];
+  for (const item of raw.slice(0, MAX_ERASE_STROKES)) {
+    if (!item || typeof item !== 'object') continue;
+    if (item.type === 'box') {
+      const w = Math.max(1, svgNum(item.w));
+      const h = Math.max(1, svgNum(item.h));
+      strokes.push({ type: 'box', x: svgNum(item.x), y: svgNum(item.y), w, h });
+    } else if (item.type === 'brush' && Array.isArray(item.points) && item.points.length) {
+      const points = item.points
+        .slice(0, MAX_ERASE_POINTS)
+        .filter(p => Array.isArray(p) && p.length === 2)
+        .map(p => [svgNum(p[0]), svgNum(p[1])]);
+      if (!points.length) continue;
+      // svgNum is strict, so an absent size must default before it gets there.
+      const size = Math.max(1, Math.min(500, item.size == null ? 20 : svgNum(item.size)));
+      strokes.push({ type: 'brush', points, size });
+    }
+  }
+  return strokes;
+}
+
+function quadBounds(quad, imgW, imgH) {
+  const xs = quad.map(p => p[0]);
+  const ys = quad.map(p => p[1]);
+  let x = Math.max(0, Math.min(imgW - 1, Math.floor(Math.min(...xs))));
+  let y = Math.max(0, Math.min(imgH - 1, Math.floor(Math.min(...ys))));
+  let w = Math.ceil(Math.max(...xs)) - x;
+  let h = Math.ceil(Math.max(...ys)) - y;
+  w = Math.max(1, Math.min(w, imgW - x));
+  h = Math.max(1, Math.min(h, imgH - y));
+  return { x, y, w, h };
+}
+
+// An overlay the size of the crop, painting everything the admin excluded. Drawn as
+// SVG because sharp can composite it directly — no extra dependency, no pixel loops.
+function buildMaskSvg({ box, quad, erase, bgColor }) {
+  const bg = HEX_COLOR.test(bgColor || '') ? bgColor : '#ffffff';
+  const rx = p => p[0] - box.x;
+  const ry = p => p[1] - box.y;
+
+  const parts = [];
+
+  // Outer rect + quad as one path with even-odd fill: the ring between them (the
+  // corners the admin dragged away) is painted, the quad's interior is left alone.
+  const quadPath = quad.map((p, i) => `${i ? 'L' : 'M'}${rx(p)} ${ry(p)}`).join(' ') + ' Z';
+  parts.push(
+    `<path d="M0 0 L${box.w} 0 L${box.w} ${box.h} L0 ${box.h} Z ${quadPath}" fill="${bg}" fill-rule="evenodd"/>`
+  );
+
+  for (const stroke of erase) {
+    if (stroke.type === 'box') {
+      parts.push(`<rect x="${stroke.x - box.x}" y="${stroke.y - box.y}" width="${stroke.w}" height="${stroke.h}" fill="${bg}"/>`);
+    } else if (stroke.points.length === 1) {
+      // A single tap still has to leave a dot; a 1-point polyline draws nothing.
+      parts.push(`<circle cx="${rx(stroke.points[0])}" cy="${ry(stroke.points[0])}" r="${stroke.size / 2}" fill="${bg}"/>`);
+    } else {
+      const pts = stroke.points.map(p => `${rx(p)},${ry(p)}`).join(' ');
+      parts.push(
+        `<polyline points="${pts}" fill="none" stroke="${bg}" stroke-width="${stroke.size}" stroke-linecap="round" stroke-linejoin="round"/>`
+      );
+    }
+  }
+
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${box.w}" height="${box.h}" viewBox="0 0 ${box.w} ${box.h}">${parts.join('')}</svg>`
+  );
+}
+
+async function renderSegmentCrop({ sheetPath, outPath, box, quad, erase, bgColor }) {
+  let pipeline = sharp(sheetPath).extract({ left: box.x, top: box.y, width: box.w, height: box.h });
+  // Skip compositing entirely when the shape is still a plain rectangle and nothing
+  // was erased — the common case stays a straight extract.
+  const isPlainRect =
+    erase.length === 0 &&
+    quad[0][0] === quad[3][0] && quad[1][0] === quad[2][0] &&
+    quad[0][1] === quad[1][1] && quad[2][1] === quad[3][1];
+  if (!isPlainRect) {
+    pipeline = pipeline.composite([{ input: buildMaskSvg({ box, quad, erase, bgColor }), top: 0, left: 0 }]);
+  }
+  await pipeline.jpeg({ quality: 92 }).toFile(outPath);
+}
+
 // The sheet image with its expected lines and any rectangles already drawn.
 app.get('/api/admin/images/:id/lines', requireAdmin, (req, res) => {
   try {
@@ -863,36 +984,49 @@ app.post('/api/admin/images/:id/segments', requireAdmin, async (req, res) => {
     const imgW = meta.width || 0;
     const imgH = meta.height || 0;
 
-    // Clamp the incoming box to the image: a drag that runs off the edge of the
-    // canvas must still produce a crop sharp can actually extract.
-    let x = Math.round(Number(req.body?.x));
-    let y = Math.round(Number(req.body?.y));
-    let w = Math.round(Number(req.body?.w));
-    let h = Math.round(Number(req.body?.h));
-    if ([x, y, w, h].some(v => !Number.isFinite(v))) {
-      return res.status(400).json({ success: false, error: 'مختصات کادر نامعتبر است.' });
+    // Accept either the four corners or a plain x/y/w/h box (older clients and the
+    // test suite post the box form); a box is just a quad with square corners.
+    let quad;
+    if (Array.isArray(req.body?.quad)) {
+      quad = parseQuad(req.body.quad, null);
+      if (!quad) return res.status(400).json({ success: false, error: 'شکل کادر نامعتبر است.' });
+    } else {
+      const bx = Number(req.body?.x);
+      const by = Number(req.body?.y);
+      const bw = Number(req.body?.w);
+      const bh = Number(req.body?.h);
+      if (![bx, by, bw, bh].every(Number.isFinite)) {
+        return res.status(400).json({ success: false, error: 'مختصات کادر نامعتبر است.' });
+      }
+      quad = [[bx, by], [bx + bw, by], [bx + bw, by + bh], [bx, by + bh]].map(p => [Math.round(p[0]), Math.round(p[1])]);
     }
-    x = Math.max(0, Math.min(x, imgW - 1));
-    y = Math.max(0, Math.min(y, imgH - 1));
-    w = Math.max(1, Math.min(w, imgW - x));
-    h = Math.max(1, Math.min(h, imgH - y));
-    if (w < 8 || h < 8) {
+
+    // Clamp to the image: a drag that ran off the edge of the canvas must still
+    // produce a crop sharp can actually extract.
+    quad = quad.map(([px, py]) => [
+      Math.max(0, Math.min(Math.round(px), imgW)),
+      Math.max(0, Math.min(Math.round(py), imgH)),
+    ]);
+
+    const box = quadBounds(quad, imgW, imgH);
+    if (box.w < 8 || box.h < 8) {
       return res.status(400).json({ success: false, error: 'کادر انتخابی بسیار کوچک است. لطفاً کادر بزرگ‌تری بکشید.' });
     }
 
+    const erase = parseErase(req.body?.erase);
+    const bgColor = HEX_COLOR.test(req.body?.bg_color || '') ? req.body.bg_color : '#ffffff';
+
     const filename = `seg_${image.id}_${String(lineNo).padStart(2, '0')}_${crypto.randomBytes(6).toString('hex')}.jpg`;
     const outPath = path.join(config.SEGMENTS_DIR, filename);
-    await sharp(sheetPath)
-      .extract({ left: x, top: y, width: w, height: h })
-      .jpeg({ quality: 92 })
-      .toFile(outPath);
+    await renderSegmentCrop({ sheetPath, outPath, box, quad, erase, bgColor });
 
     const { previousFilename } = db.upsertSegment({
       imageId: image.id,
       promptId: line.prompt_id,
       lineNo,
       text: line.text,
-      x, y, w, h,
+      x: box.x, y: box.y, w: box.w, h: box.h,
+      quad, erase, bgColor,
       filename,
     });
 
@@ -901,12 +1035,21 @@ app.post('/api/admin/images/:id/segments', requireAdmin, async (req, res) => {
 
     res.json({
       success: true,
-      segment: { line_no: lineNo, text: line.text, x, y, w, h, filename },
+      segment: {
+        line_no: lineNo, text: line.text,
+        x: box.x, y: box.y, w: box.w, h: box.h,
+        quad, erase, bg_color: bgColor, filename,
+      },
       segmentCount: db.countSegments(image.id),
       totalLines: lines.length,
     });
   } catch (err) {
     console.error('[API] POST /api/admin/images/:id/segments:', err.message);
+    // Geometry parsing rejects malformed corners/strokes with a 400; only genuine
+    // failures should read as a server error.
+    if (err.statusCode === 400) {
+      return res.status(400).json({ success: false, error: 'شکل یا مختصات ارسالی نامعتبر است.' });
+    }
     res.status(500).json({ success: false, error: 'خطا در برش تصویر.' });
   }
 });

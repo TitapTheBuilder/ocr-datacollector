@@ -441,15 +441,19 @@
       });
     });
   }
-
   // --- Review & manual segmentation workspace ---
   //
   // A volunteer uploads ONE page holding ten handwritten lines. The dataset needs
   // one tight crop per line, labelled with the exact text that line was meant to be.
-  // The admin drags a rectangle around the current line; on pointerup the box is
-  // posted, the server cuts the crop with sharp, and the next unfinished line is
-  // selected automatically. Boxes are stored in ORIGINAL image pixels, so the on
-  // screen scale (zoom, window size) never leaks into the saved data.
+  //
+  // Nobody writes ten perfectly straight, well-spaced lines, so a line's shape is
+  // FOUR DRAGGABLE CORNERS rather than an axis-aligned box, and the admin can paint
+  // over whatever still leaked in from the lines above and below. Both are stored as
+  // instructions, never baked into the upload: the crop is re-cut from the original
+  // sheet on every save, and the mask is painted on that copy in the paper colour.
+  //
+  // All geometry is kept in ORIGINAL image pixels, so zoom and window size never
+  // leak into the saved data.
 
   const segCanvas = document.getElementById('segCanvas');
   const segCanvasWrap = document.getElementById('segCanvasWrap');
@@ -461,28 +465,65 @@
   const segZoomIn = document.getElementById('segZoomIn');
   const segZoomOut = document.getElementById('segZoomOut');
   const segZoomFit = document.getElementById('segZoomFit');
+  const segToolButtons = document.querySelectorAll('.seg-tool');
+  const segBrushSizeWrap = document.getElementById('segBrushSizeWrap');
+  const segBrushSize = document.getElementById('segBrushSize');
+  const segBrushSizeVal = document.getElementById('segBrushSizeVal');
+  const segBgColor = document.getElementById('segBgColor');
+  const segBgAuto = document.getElementById('segBgAuto');
+  const segUndoErase = document.getElementById('segUndoErase');
+  const segClearErase = document.getElementById('segClearErase');
+  const segNextLine = document.getElementById('segNextLine');
+  const segSaveState = document.getElementById('segSaveState');
 
-  const SEG_MIN_DRAG = 8; // display px below which a drag is treated as a stray tap
+  const SEG_MIN_DRAG = 8;      // display px below which a drag is a stray tap
+  const SEG_HANDLE_HIT = 20;   // display px radius for grabbing a corner
+  const SEG_SAVE_DELAY = 450;  // ms of quiet before an edit is pushed to the server
 
   const seg = {
     image: null,      // the current sheet as an HTMLImageElement
-    imageEl: null,
     data: null,       // { image, lines } from /lines
     activeLine: null,
     scale: 1,
     fitScale: 1,
+    tool: 'select',
     drag: null,
     preview: null,    // rectangle being dragged, in image pixels
+    stroke: null,     // erase stroke in progress
     busy: false,
+    saveTimer: null,
+    pending: false,
   };
 
   function segReset() {
+    if (seg.saveTimer) clearTimeout(seg.saveTimer);
     seg.image = null;
     seg.data = null;
     seg.activeLine = null;
     seg.drag = null;
     seg.preview = null;
+    seg.stroke = null;
     seg.busy = false;
+    seg.saveTimer = null;
+    seg.pending = false;
+    setSaveState('');
+  }
+
+  function setSaveState(text, kind) {
+    if (!segSaveState) return;
+    segSaveState.textContent = text;
+    segSaveState.className = 'seg-save-state' + (kind ? ' ' + kind : '');
+  }
+
+  function activeLineObj() {
+    if (!seg.data || seg.activeLine === null) return null;
+    return seg.data.lines.find(l => l.line_no === seg.activeLine) || null;
+  }
+
+  // The shape being edited. A line with no segment yet has nothing to edit.
+  function activeShape() {
+    const line = activeLineObj();
+    return line && line.segment ? line.segment : null;
   }
 
   async function openModal(imageId) {
@@ -497,6 +538,8 @@
 
       segReset();
       seg.data = data;
+      seg.tool = 'select';
+      syncToolButtons();
 
       const img = data.image;
       const categoryLabel = img.sheet_category === 'numbers'
@@ -570,48 +613,70 @@
   if (segZoomFit) segZoomFit.addEventListener('click', () => { segFit(); segDraw(); });
   if (segShowBoxes) segShowBoxes.addEventListener('change', segDraw);
 
-  function segDraw() {
-    if (!seg.image || !segCanvas.width) return;
-    const ctx = segCanvas.getContext('2d');
-    const s = seg.scale;
-    ctx.clearRect(0, 0, segCanvas.width, segCanvas.height);
-    ctx.drawImage(seg.image, 0, 0, segCanvas.width, segCanvas.height);
-
-    if (segShowBoxes && segShowBoxes.checked && seg.data) {
-      for (const line of seg.data.lines) {
-        if (!line.segment) continue;
-        const isActive = line.line_no === seg.activeLine;
-        const x = line.segment.x * s, y = line.segment.y * s;
-        const w = line.segment.w * s, h = line.segment.h * s;
-
-        ctx.strokeStyle = isActive ? '#dc2626' : '#16a34a';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x, y, w, h);
-        ctx.fillStyle = isActive ? 'rgba(220,38,38,0.14)' : 'rgba(22,163,74,0.10)';
-        ctx.fillRect(x, y, w, h);
-
-        // Line number badge, kept inside the canvas for boxes drawn at the top edge.
-        const badgeY = y < 20 ? y + 4 : y - 18;
-        ctx.fillStyle = isActive ? '#dc2626' : '#16a34a';
-        ctx.fillRect(x, badgeY, 26, 16);
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 11px sans-serif';
-        ctx.textBaseline = 'middle';
-        ctx.textAlign = 'center';
-        ctx.fillText(String(line.line_no), x + 13, badgeY + 8);
+  // --- Paper colour -------------------------------------------------------
+  //
+  // The eraser paints the paper colour so a blanked patch is invisible in the crop.
+  // Handwriting is a minority of the pixels in a line's box, so the per-channel
+  // MEDIAN of that box is the paper — robust to ink, ruling and a stray shadow in a
+  // way a mean or a corner sample is not.
+  function detectPaperColor(box) {
+    if (!seg.image || !box) return '#ffffff';
+    const sw = Math.max(1, Math.min(160, Math.round(box.w)));
+    const sh = Math.max(1, Math.min(160, Math.round(box.h)));
+    const tmp = document.createElement('canvas');
+    tmp.width = sw;
+    tmp.height = sh;
+    const ctx = tmp.getContext('2d', { willReadFrequently: true });
+    try {
+      ctx.drawImage(seg.image, box.x, box.y, box.w, box.h, 0, 0, sw, sh);
+      const { data } = ctx.getImageData(0, 0, sw, sh);
+      const channels = [[], [], []];
+      for (let i = 0; i < data.length; i += 4) {
+        channels[0].push(data[i]);
+        channels[1].push(data[i + 1]);
+        channels[2].push(data[i + 2]);
       }
+      const median = arr => {
+        arr.sort((a, b) => a - b);
+        return arr[Math.floor(arr.length / 2)] || 255;
+      };
+      const rgb = channels.map(median);
+      return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
+    } catch (err) {
+      console.warn('paper colour detection failed:', err.message);
+      return '#ffffff';
     }
+  }
 
-    if (seg.preview) {
-      const p = seg.preview;
-      ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = '#2563eb';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(p.x * s, p.y * s, p.w * s, p.h * s);
-      ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(37,99,235,0.14)';
-      ctx.fillRect(p.x * s, p.y * s, p.w * s, p.h * s);
+  function currentBgColor() {
+    const shape = activeShape();
+    if (shape && shape.bg_color) return shape.bg_color;
+    return segBgColor ? segBgColor.value : '#ffffff';
+  }
+
+  // --- Geometry helpers ---------------------------------------------------
+
+  function quadBBox(quad) {
+    const xs = quad.map(p => p[0]);
+    const ys = quad.map(p => p[1]);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+  }
+
+  function rectToQuad(x, y, w, h) {
+    return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+  }
+
+  function pointInQuad(px, py, quad) {
+    let inside = false;
+    for (let i = 0, j = quad.length - 1; i < quad.length; j = i++) {
+      const [xi, yi] = quad[i];
+      const [xj, yj] = quad[j];
+      const hit = (yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi + Number.EPSILON) + xi;
+      if (hit) inside = !inside;
     }
+    return inside;
   }
 
   function segPoint(e) {
@@ -622,83 +687,470 @@
     };
   }
 
+  // Display point -> original-image point.
+  function toImagePoint(p) {
+    return [p.x / seg.scale, p.y / seg.scale];
+  }
+
+  function clampToImage(point) {
+    return [
+      Math.max(0, Math.min(point[0], seg.image ? seg.image.naturalWidth : point[0])),
+      Math.max(0, Math.min(point[1], seg.image ? seg.image.naturalHeight : point[1])),
+    ];
+  }
+
+  // Which corner (if any) is under the pointer, in display space.
+  function hitCorner(p) {
+    const shape = activeShape();
+    if (!shape) return -1;
+    for (let i = 0; i < shape.quad.length; i++) {
+      const cx = shape.quad[i][0] * seg.scale;
+      const cy = shape.quad[i][1] * seg.scale;
+      if (Math.abs(p.x - cx) <= SEG_HANDLE_HIT / 2 && Math.abs(p.y - cy) <= SEG_HANDLE_HIT / 2) return i;
+    }
+    return -1;
+  }
+
+  // --- Drawing ------------------------------------------------------------
+
+  function segDraw() {
+    if (!seg.image || !segCanvas.width) return;
+    const ctx = segCanvas.getContext('2d');
+    const s = seg.scale;
+    ctx.clearRect(0, 0, segCanvas.width, segCanvas.height);
+    ctx.drawImage(seg.image, 0, 0, segCanvas.width, segCanvas.height);
+
+    const active = activeLineObj();
+
+    if (segShowBoxes && segShowBoxes.checked && seg.data) {
+      for (const line of seg.data.lines) {
+        if (!line.segment) continue;
+        if (active && line.line_no === active.line_no) continue; // drawn last, in full
+        drawShapeOutline(ctx, line.segment.quad, line.line_no, '#16a34a', 'rgba(22,163,74,0.10)');
+      }
+    }
+
+    // The active line is rendered as the crop will actually look: everything outside
+    // the four corners, and everything erased, painted in the paper colour. What the
+    // admin sees here is what the saved crop contains.
+    if (active && active.segment) {
+      paintActiveShape(ctx, active.segment);
+    }
+
+    if (seg.preview) {
+      const p = seg.preview;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = seg.tool === 'erasebox' ? '#dc2626' : '#2563eb';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(p.x * s, p.y * s, p.w * s, p.h * s);
+      ctx.setLineDash([]);
+      ctx.fillStyle = seg.tool === 'erasebox' ? 'rgba(220,38,38,0.18)' : 'rgba(37,99,235,0.14)';
+      ctx.fillRect(p.x * s, p.y * s, p.w * s, p.h * s);
+    }
+  }
+
+  function drawShapeOutline(ctx, quad, lineNo, stroke, fill) {
+    const s = seg.scale;
+    ctx.beginPath();
+    quad.forEach(([x, y], i) => {
+      if (i === 0) ctx.moveTo(x * s, y * s);
+      else ctx.lineTo(x * s, y * s);
+    });
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const box = quadBBox(quad);
+    const bx = box.x * s;
+    const by = box.y * s;
+    const badgeY = by < 20 ? by + 4 : by - 18;
+    ctx.fillStyle = stroke;
+    ctx.fillRect(bx, badgeY, 26, 16);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.fillText(String(lineNo), bx + 13, badgeY + 8);
+  }
+
+  function paintActiveShape(ctx, shape) {
+    const s = seg.scale;
+    const quad = shape.quad;
+    const box = quadBBox(quad);
+    const bg = currentBgColor();
+
+    ctx.save();
+
+    // 1. Blank the ring between the bounding box and the quad, exactly as the server
+    //    will, using even-odd so only the outside is filled.
+    ctx.beginPath();
+    ctx.rect(box.x * s, box.y * s, box.w * s, box.h * s);
+    quad.forEach(([x, y], i) => {
+      if (i === 0) ctx.moveTo(x * s, y * s);
+      else ctx.lineTo(x * s, y * s);
+    });
+    ctx.closePath();
+    ctx.fillStyle = bg;
+    ctx.fill('evenodd');
+
+    // 2. Erase strokes, clipped to the crop so a stroke dragged outside the box does
+    //    not paint over the rest of the page in the preview.
+    const strokes = (shape.erase || []).concat(seg.stroke ? [seg.stroke] : []);
+    if (strokes.length) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(box.x * s, box.y * s, box.w * s, box.h * s);
+      ctx.clip();
+      ctx.fillStyle = bg;
+      ctx.strokeStyle = bg;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (const stroke of strokes) {
+        if (stroke.type === 'box') {
+          ctx.fillRect(stroke.x * s, stroke.y * s, stroke.w * s, stroke.h * s);
+        } else if (stroke.points && stroke.points.length === 1) {
+          ctx.beginPath();
+          ctx.arc(stroke.points[0][0] * s, stroke.points[0][1] * s, (stroke.size * s) / 2, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (stroke.points && stroke.points.length > 1) {
+          ctx.lineWidth = stroke.size * s;
+          ctx.beginPath();
+          stroke.points.forEach(([x, y], i) => {
+            if (i === 0) ctx.moveTo(x * s, y * s);
+            else ctx.lineTo(x * s, y * s);
+          });
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    // 3. Outline plus the draggable corners on top of the finished preview.
+    ctx.beginPath();
+    quad.forEach(([x, y], i) => {
+      if (i === 0) ctx.moveTo(x * s, y * s);
+      else ctx.lineTo(x * s, y * s);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    if (seg.tool === 'select') {
+      for (const [x, y] of quad) {
+        const cx = x * s;
+        const cy = y * s;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = '#dc2626';
+        ctx.stroke();
+      }
+    }
+  }
+
+  // --- Tools --------------------------------------------------------------
+
+  function syncToolButtons() {
+    segToolButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.tool === seg.tool));
+    if (segBrushSizeWrap) segBrushSizeWrap.style.display = seg.tool === 'brush' ? 'inline-flex' : 'none';
+    segCanvas.classList.toggle('erasing', seg.tool !== 'select');
+    updateEraseButtons();
+  }
+
+  function updateEraseButtons() {
+    const shape = activeShape();
+    const count = shape && shape.erase ? shape.erase.length : 0;
+    if (segUndoErase) segUndoErase.disabled = count === 0;
+    if (segClearErase) segClearErase.disabled = count === 0;
+  }
+
+  segToolButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      seg.tool = btn.dataset.tool;
+      syncToolButtons();
+      segDraw();
+    });
+  });
+
+  if (segBrushSize) {
+    segBrushSize.addEventListener('input', () => {
+      if (segBrushSizeVal) segBrushSizeVal.textContent = faDigits(segBrushSize.value);
+    });
+  }
+
+  if (segBgColor) {
+    segBgColor.addEventListener('input', () => {
+      const shape = activeShape();
+      if (!shape) return;
+      shape.bg_color = segBgColor.value;
+      segDraw();
+      queueSegmentSave();
+    });
+  }
+
+  if (segBgAuto) {
+    segBgAuto.addEventListener('click', () => {
+      const shape = activeShape();
+      if (!shape) return;
+      const colour = detectPaperColor(quadBBox(shape.quad));
+      shape.bg_color = colour;
+      if (segBgColor) segBgColor.value = colour;
+      segDraw();
+      queueSegmentSave();
+    });
+  }
+
+  if (segUndoErase) {
+    segUndoErase.addEventListener('click', () => {
+      const shape = activeShape();
+      if (!shape || !shape.erase.length) return;
+      shape.erase.pop();
+      updateEraseButtons();
+      segDraw();
+      queueSegmentSave();
+    });
+  }
+
+  if (segClearErase) {
+    segClearErase.addEventListener('click', () => {
+      const shape = activeShape();
+      if (!shape || !shape.erase.length) return;
+      shape.erase = [];
+      updateEraseButtons();
+      segDraw();
+      queueSegmentSave();
+    });
+  }
+
+  // --- Pointer interaction -------------------------------------------------
+
   segCanvas.addEventListener('pointerdown', (e) => {
     if (!seg.image || seg.busy || seg.activeLine === null) return;
     segCanvas.setPointerCapture(e.pointerId);
     const p = segPoint(e);
-    seg.drag = { startDisplay: p, anchor: { x: p.x / seg.scale, y: p.y / seg.scale } };
-    seg.preview = null;
+    const imgPoint = toImagePoint(p);
+    const shape = activeShape();
+
+    if (seg.tool === 'brush') {
+      if (!shape) return;
+      seg.stroke = { type: 'brush', points: [clampToImage(imgPoint)], size: Number(segBrushSize?.value) || 24 };
+      seg.drag = { mode: 'brush' };
+      segDraw();
+      return;
+    }
+
+    if (seg.tool === 'erasebox') {
+      if (!shape) return;
+      seg.drag = { mode: 'erasebox', anchor: imgPoint };
+      seg.preview = { x: imgPoint[0], y: imgPoint[1], w: 0, h: 0 };
+      return;
+    }
+
+    // Select tool: grab a corner, move the whole shape, or start a new box.
+    const corner = hitCorner(p);
+    if (corner !== -1) {
+      seg.drag = { mode: 'corner', index: corner };
+      return;
+    }
+    if (shape && pointInQuad(imgPoint[0], imgPoint[1], shape.quad)) {
+      seg.drag = { mode: 'move', start: imgPoint, orig: shape.quad.map(pt => pt.slice()) };
+      return;
+    }
+    seg.drag = { mode: 'new', anchor: imgPoint };
+    seg.preview = { x: imgPoint[0], y: imgPoint[1], w: 0, h: 0 };
   });
 
   segCanvas.addEventListener('pointermove', (e) => {
     if (!seg.drag) return;
     const p = segPoint(e);
-    const bx = p.x / seg.scale;
-    const by = p.y / seg.scale;
-    seg.preview = {
-      x: Math.min(seg.drag.anchor.x, bx),
-      y: Math.min(seg.drag.anchor.y, by),
-      w: Math.abs(bx - seg.drag.anchor.x),
-      h: Math.abs(by - seg.drag.anchor.y),
-    };
-    segDraw();
+    const imgPoint = toImagePoint(p);
+    const shape = activeShape();
+
+    if (seg.drag.mode === 'brush' && seg.stroke) {
+      // pointermove fires far denser than the stroke needs. Drop points that land
+      // within a couple of image pixels of the last one, so a long drag stays a
+      // small payload and a light redraw instead of thousands of duplicates.
+      const next = clampToImage(imgPoint);
+      const last = seg.stroke.points[seg.stroke.points.length - 1];
+      if (Math.abs(next[0] - last[0]) >= 2 || Math.abs(next[1] - last[1]) >= 2) {
+        seg.stroke.points.push(next);
+        segDraw();
+      }
+      return;
+    }
+
+    if (seg.drag.mode === 'corner' && shape) {
+      shape.quad[seg.drag.index] = clampToImage(imgPoint);
+      segDraw();
+      return;
+    }
+
+    if (seg.drag.mode === 'move' && shape) {
+      const dx = imgPoint[0] - seg.drag.start[0];
+      const dy = imgPoint[1] - seg.drag.start[1];
+      shape.quad = seg.drag.orig.map(([x, y]) => clampToImage([x + dx, y + dy]));
+      segDraw();
+      return;
+    }
+
+    if (seg.drag.mode === 'new' || seg.drag.mode === 'erasebox') {
+      const a = seg.drag.anchor;
+      seg.preview = {
+        x: Math.min(a[0], imgPoint[0]),
+        y: Math.min(a[1], imgPoint[1]),
+        w: Math.abs(imgPoint[0] - a[0]),
+        h: Math.abs(imgPoint[1] - a[1]),
+      };
+      segDraw();
+    }
   });
 
   async function segEndDrag(e) {
     if (!seg.drag) return;
-    const startDisplay = seg.drag.startDisplay;
+    const mode = seg.drag.mode;
     seg.drag = null;
     if (e && e.pointerId !== undefined && segCanvas.hasPointerCapture(e.pointerId)) {
       segCanvas.releasePointerCapture(e.pointerId);
     }
 
-    const box = seg.preview;
-    seg.preview = null;
+    const shape = activeShape();
 
-    // A click without a real drag should not save a one-pixel crop.
-    if (!box || box.w * seg.scale < SEG_MIN_DRAG || box.h * seg.scale < SEG_MIN_DRAG) {
+    if (mode === 'brush') {
+      if (seg.stroke && shape) {
+        shape.erase.push(seg.stroke);
+        updateEraseButtons();
+        queueSegmentSave();
+      }
+      seg.stroke = null;
       segDraw();
       return;
     }
 
-    await saveSegment(seg.activeLine, box);
+    if (mode === 'erasebox') {
+      const box = seg.preview;
+      seg.preview = null;
+      // A selection box needs real width AND height, but the commonest erase is a
+      // thin horizontal strip over the line above — so require one long side and
+      // only a couple of pixels on the other, or that strip is silently discarded.
+      const longSide = Math.max(box ? box.w : 0, box ? box.h : 0) * seg.scale;
+      const shortSide = Math.min(box ? box.w : 0, box ? box.h : 0) * seg.scale;
+      if (shape && box && longSide >= SEG_MIN_DRAG && shortSide >= 2) {
+        shape.erase.push({
+          type: 'box',
+          x: Math.round(box.x), y: Math.round(box.y),
+          w: Math.round(box.w), h: Math.round(box.h),
+        });
+        updateEraseButtons();
+        queueSegmentSave();
+      }
+      segDraw();
+      return;
+    }
+
+    if (mode === 'corner' || mode === 'move') {
+      queueSegmentSave();
+      segDraw();
+      return;
+    }
+
+    if (mode === 'new') {
+      const box = seg.preview;
+      seg.preview = null;
+      // A click without a real drag should not save a one-pixel crop.
+      if (!box || box.w * seg.scale < SEG_MIN_DRAG || box.h * seg.scale < SEG_MIN_DRAG) {
+        segDraw();
+        return;
+      }
+      const quad = rectToQuad(Math.round(box.x), Math.round(box.y), Math.round(box.w), Math.round(box.h));
+      const line = activeLineObj();
+      if (!line) return;
+      const colour = detectPaperColor(quadBBox(quad));
+      if (segBgColor) segBgColor.value = colour;
+      line.segment = { line_no: line.line_no, text: line.text, quad, erase: [], bg_color: colour };
+      updateEraseButtons();
+      segDraw();
+      await saveSegment();
+    }
   }
 
   segCanvas.addEventListener('pointerup', segEndDrag);
-  segCanvas.addEventListener('pointercancel', () => { seg.drag = null; seg.preview = null; segDraw(); });
+  segCanvas.addEventListener('pointercancel', () => {
+    seg.drag = null;
+    seg.preview = null;
+    seg.stroke = null;
+    segDraw();
+  });
 
-  async function saveSegment(lineNo, box) {
-    if (!seg.data) return;
+  // --- Saving --------------------------------------------------------------
+  //
+  // Corner drags and erase strokes come in bursts, and each save re-cuts the crop
+  // server-side. Coalesce them so a fiddly adjustment is one request, not thirty.
+  function queueSegmentSave() {
+    seg.pending = true;
+    setSaveState('در حال ذخیره...', 'saving');
+    if (seg.saveTimer) clearTimeout(seg.saveTimer);
+    seg.saveTimer = setTimeout(() => {
+      seg.saveTimer = null;
+      saveSegment();
+    }, SEG_SAVE_DELAY);
+  }
+
+  async function flushSegmentSave() {
+    if (seg.saveTimer) {
+      clearTimeout(seg.saveTimer);
+      seg.saveTimer = null;
+      await saveSegment();
+    }
+  }
+
+  async function saveSegment() {
+    const line = activeLineObj();
+    if (!seg.data || !line || !line.segment) return;
+    const shape = line.segment;
+
     seg.busy = true;
     segCanvas.classList.add('busy');
+    setSaveState('در حال ذخیره...', 'saving');
     try {
       const res = await fetch(`/api/admin/images/${seg.data.image.id}/segments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          line_no: lineNo,
-          x: Math.round(box.x),
-          y: Math.round(box.y),
-          w: Math.round(box.w),
-          h: Math.round(box.h),
+          line_no: line.line_no,
+          quad: shape.quad.map(([x, y]) => [Math.round(x), Math.round(y)]),
+          erase: shape.erase || [],
+          bg_color: shape.bg_color || '#ffffff',
         }),
       });
       const data = await res.json();
       if (!data.success) {
-        alert(data.error || 'خطا در ذخیره برش.');
+        setSaveState(data.error || 'خطا در ذخیره', 'error');
         return;
       }
 
-      const line = seg.data.lines.find(l => l.line_no === lineNo);
-      if (line) line.segment = data.segment;
+      // Keep the locally edited geometry (the admin may have moved on already) but
+      // adopt the server's filename so the thumbnail points at the new crop.
+      shape.filename = data.segment.filename;
+      shape.x = data.segment.x;
+      shape.y = data.segment.y;
+      shape.w = data.segment.w;
+      shape.h = data.segment.h;
 
-      selectNextUnsegmentedLine();
+      seg.pending = false;
+      setSaveState('ذخیره شد ✓', 'saved');
       renderSegList();
       renderModalActions(seg.data.image);
-      segDraw();
       loadStats();
     } catch (err) {
-      alert('خطا در ارتباط با سرور: ' + err.message);
+      setSaveState('خطا در ارتباط با سرور', 'error');
     } finally {
       seg.busy = false;
       segCanvas.classList.remove('busy');
@@ -707,6 +1159,7 @@
 
   async function deleteSegmentLine(lineNo) {
     if (!seg.data) return;
+    if (seg.saveTimer) { clearTimeout(seg.saveTimer); seg.saveTimer = null; }
     try {
       const res = await fetch(`/api/admin/images/${seg.data.image.id}/segments/${lineNo}`, { method: 'DELETE' });
       const data = await res.json();
@@ -717,14 +1170,48 @@
       const line = seg.data.lines.find(l => l.line_no === lineNo);
       if (line) line.segment = null;
       seg.activeLine = lineNo;
+      setSaveState('');
       renderSegList();
       renderModalActions(seg.data.image);
+      updateEraseButtons();
       segDraw();
       loadStats();
     } catch (err) {
       alert('خطا در ارتباط با سرور: ' + err.message);
     }
   }
+
+  // --- Line navigation -----------------------------------------------------
+  //
+  // The admin now STAYS on a line after drawing it, so corners and erasing can be
+  // adjusted in place; moving on is deliberate (button or Enter).
+  async function goToNextLine() {
+    await flushSegmentSave();
+    selectNextUnsegmentedLine();
+    seg.tool = 'select';
+    seg.stroke = null;
+    seg.preview = null;
+    setSaveState('');
+    const next = activeShape();
+    if (next && next.bg_color && segBgColor) segBgColor.value = next.bg_color;
+    syncToolButtons();
+    renderSegList();
+    segDraw();
+  }
+
+  if (segNextLine) segNextLine.addEventListener('click', goToNextLine);
+
+  document.addEventListener('keydown', (e) => {
+    if (!imageModal.classList.contains('active')) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      goToNextLine();
+    } else if (e.key === 'Escape') {
+      closeReviewModal();
+    }
+  });
 
   function selectNextUnsegmentedLine() {
     if (!seg.data) return;
@@ -742,10 +1229,28 @@
     seg.activeLine = null; // everything is segmented
   }
 
-  function setActiveLine(lineNo) {
+  async function setActiveLine(lineNo) {
+    if (lineNo === seg.activeLine) return;
+    // Never let a queued edit land on the line the admin just switched away from.
+    await flushSegmentSave();
     seg.activeLine = lineNo;
+    seg.stroke = null;
+    seg.preview = null;
+    seg.tool = 'select';
+    setSaveState('');
+    // The colour picker follows the selected line's own detected paper colour.
+    const shape = activeShape();
+    if (shape && shape.bg_color && segBgColor) segBgColor.value = shape.bg_color;
+    syncToolButtons();
     renderSegList();
     segDraw();
+  }
+
+  // The admin panel writes counts in Persian digits; the brush-size readout has to
+  // match the ۲۴ it starts out showing.
+  const ADMIN_FA_DIGITS = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+  function faDigits(value) {
+    return String(value).replace(/[0-9]/g, d => ADMIN_FA_DIGITS[Number(d)]);
   }
 
   function renderSegList() {
@@ -862,8 +1367,12 @@
   });
 
   function closeReviewModal() {
-    imageModal.classList.remove('active');
-    segReset();
+    // A queued corner drag or erase stroke must reach the server before the modal
+    // state is thrown away, or the admin's last edit is silently lost.
+    flushSegmentSave().finally(() => {
+      imageModal.classList.remove('active');
+      segReset();
+    });
   }
 
   modalClose.addEventListener('click', closeReviewModal);

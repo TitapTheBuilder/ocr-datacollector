@@ -374,13 +374,45 @@
               </div>
             </div>
 
+            <!-- Tools: draw/adjust the four corners, or blank out what leaked in -->
+            <div class="seg-tools">
+              <div class="seg-tool-group" role="group" aria-label="ابزار">
+                <button type="button" class="seg-tool active" data-tool="select">✥ کادر و گوشه‌ها</button>
+                <button type="button" class="seg-tool" data-tool="brush">🖌️ پاک‌کن قلمی</button>
+                <button type="button" class="seg-tool" data-tool="erasebox">▭ پاک‌کن کادری</button>
+              </div>
+
+              <label class="seg-brush-size" id="segBrushSizeWrap">
+                ضخامت:
+                <input type="range" id="segBrushSize" min="4" max="120" value="24">
+                <span id="segBrushSizeVal">۲۴</span>
+              </label>
+
+              <label class="seg-bg-picker" title="رنگی که هنگام پاک کردن جایگزین می‌شود">
+                رنگ کاغذ:
+                <input type="color" id="segBgColor" value="#ffffff">
+                <button type="button" id="segBgAuto" class="btn btn-outline btn-sm">تشخیص خودکار</button>
+              </label>
+
+              <button type="button" id="segUndoErase" class="btn btn-outline btn-sm" disabled>↶ لغو آخرین پاک‌کردن</button>
+              <button type="button" id="segClearErase" class="btn btn-outline btn-sm" disabled>حذف همه پاک‌کردن‌ها</button>
+            </div>
+
             <div class="seg-canvas-wrap" id="segCanvasWrap">
               <canvas id="segCanvas"></canvas>
             </div>
 
+            <div class="seg-actions-bar">
+              <button type="button" id="segNextLine" class="btn btn-primary btn-sm">سطر بعدی ↵</button>
+              <span id="segSaveState" class="seg-save-state"></span>
+            </div>
+
             <div class="seg-hint">
-              روی تصویر، دور متن <strong>سطر جاری</strong> یک کادر بکشید. با رها کردن ماوس، برش ذخیره و به‌طور خودکار سطر بعدی انتخاب می‌شود.
-              برای اصلاح یک سطر، آن را از لیست کناری انتخاب کنید و دوباره کادر بکشید.
+              روی تصویر، دور متن <strong>سطر جاری</strong> یک کادر بکشید — بلافاصله ذخیره می‌شود.
+              سپس می‌توانید <strong>گوشه‌های کادر را بکشید</strong> تا کج‌نویسی سطر را دنبال کند، و با
+              <strong>پاک‌کن</strong> تکه‌های سطر بالا یا پایین را که داخل کادر افتاده‌اند حذف کنید.
+              پاک‌کردن فقط روی همین برش اثر دارد و تصویر اصلی دست‌نخورده می‌ماند.
+              با دکمه «سطر بعدی» یا کلید <kbd>Enter</kbd> به سطر بعد بروید.
             </div>
           </div>
 

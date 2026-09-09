@@ -128,6 +128,13 @@ async function initDatabase() {
   try { db.run(`ALTER TABLE contributors ADD COLUMN name TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN ip_address TEXT`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN file_hash TEXT`); } catch (_) {}
+  // Free-form segment shape. x/y/w/h stay as the bounding box (exports and sharp's
+  // extract still need it); `quad` holds the four draggable corners, `erase` the
+  // admin's blanking strokes, and `bg_color` the paper colour both are painted in.
+  try { db.run(`ALTER TABLE segments ADD COLUMN quad TEXT`); } catch (_) {}
+  try { db.run(`ALTER TABLE segments ADD COLUMN erase TEXT`); } catch (_) {}
+  try { db.run(`ALTER TABLE segments ADD COLUMN bg_color TEXT`); } catch (_) {}
+
   // Sheet-era columns: an image is now a whole page of lines, not a single word.
   try { db.run(`ALTER TABLE images ADD COLUMN assignment_id INTEGER`); } catch (_) {}
   try { db.run(`ALTER TABLE images ADD COLUMN sheet_category TEXT`); } catch (_) {}
@@ -518,35 +525,64 @@ function getContributorProgress(contributorId) {
 
 // --- Segments (admin-drawn crops) ---
 
+// `quad` and `erase` are stored as JSON text. Callers work with real arrays, so
+// parse on the way out and stringify on the way in, in one place.
+function hydrateSegment(row) {
+  if (!row) return row;
+  let quad = null;
+  let erase = [];
+  try { if (row.quad) quad = JSON.parse(row.quad); } catch (_) {}
+  try { if (row.erase) erase = JSON.parse(row.erase); } catch (_) {}
+  // A segment saved before free-form shapes existed has no quad: its shape is its
+  // bounding box, so synthesise the four corners rather than special-casing callers.
+  if (!Array.isArray(quad) || quad.length !== 4) {
+    quad = [
+      [row.x, row.y],
+      [row.x + row.w, row.y],
+      [row.x + row.w, row.y + row.h],
+      [row.x, row.y + row.h],
+    ];
+  }
+  return { ...row, quad, erase: Array.isArray(erase) ? erase : [] };
+}
+
 function getSegments(imageId) {
-  return all(`SELECT * FROM segments WHERE image_id = ? ORDER BY line_no ASC`, [imageId]);
+  return all(`SELECT * FROM segments WHERE image_id = ? ORDER BY line_no ASC`, [imageId])
+    .map(hydrateSegment);
 }
 
 function getSegment(imageId, lineNo) {
-  return get(`SELECT * FROM segments WHERE image_id = ? AND line_no = ?`, [imageId, lineNo]);
+  return hydrateSegment(get(`SELECT * FROM segments WHERE image_id = ? AND line_no = ?`, [imageId, lineNo]));
 }
 
 function upsertSegment(data) {
   const existing = getSegment(data.imageId, data.lineNo);
+  const quadJson = data.quad ? JSON.stringify(data.quad) : null;
+  const eraseJson = JSON.stringify(data.erase || []);
+  const bgColor = data.bgColor || null;
+
   if (existing) {
     run(`
       UPDATE segments
-      SET prompt_id = ?, text = ?, x = ?, y = ?, w = ?, h = ?, filename = ?, updated_at = datetime('now')
+      SET prompt_id = ?, text = ?, x = ?, y = ?, w = ?, h = ?, filename = ?,
+          quad = ?, erase = ?, bg_color = ?, updated_at = datetime('now')
       WHERE id = ?
     `, [
       data.promptId || null, data.text,
       data.x, data.y, data.w, data.h,
-      data.filename || null, existing.id,
+      data.filename || null,
+      quadJson, eraseJson, bgColor, existing.id,
     ]);
     return { id: existing.id, previousFilename: existing.filename };
   }
 
   const result = run(`
-    INSERT INTO segments (image_id, prompt_id, line_no, text, x, y, w, h, filename, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO segments (image_id, prompt_id, line_no, text, x, y, w, h, filename, quad, erase, bg_color, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `, [
     data.imageId, data.promptId || null, data.lineNo, data.text,
     data.x, data.y, data.w, data.h, data.filename || null,
+    quadJson, eraseJson, bgColor,
   ]);
   return { id: result.lastInsertRowid, previousFilename: null };
 }

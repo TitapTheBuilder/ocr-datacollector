@@ -1732,3 +1732,95 @@ body {
   background: inherit;
   border-color: inherit;
 }
+
+/* ==========================================================================
+   ADMIN — SEGMENT SHAPE TOOLS (corners + eraser)
+   ========================================================================== */
+
+.seg-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.seg-tool-group {
+  display: inline-flex;
+  border: 1px solid var(--gray-300);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.seg-tool {
+  background: white;
+  border: none;
+  border-left: 1px solid var(--gray-200);
+  padding: 7px 12px;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--gray-700);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg-tool:last-child { border-left: none; }
+.seg-tool:hover { background: var(--gray-50); }
+.seg-tool.active { background: var(--primary); color: white; }
+
+.seg-brush-size,
+.seg-bg-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--gray-700);
+  white-space: nowrap;
+}
+
+.seg-brush-size input[type="range"] { width: 110px; }
+
+.seg-bg-picker input[type="color"] {
+  width: 34px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--gray-300);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+/* The cursor tells the admin which tool is live: crosshair draws, the eraser
+   tools get a distinct one so a stray drag is not mistaken for a new box. */
+#segCanvas.erasing { cursor: cell; }
+
+.seg-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.seg-save-state {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--gray-500);
+}
+.seg-save-state.saving { color: #92400e; }
+.seg-save-state.saved { color: var(--success); }
+.seg-save-state.error { color: var(--danger); }
+
+.seg-hint kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--gray-300);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: white;
+  font-size: 0.75rem;
+  font-family: inherit;
+}
