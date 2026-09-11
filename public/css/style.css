@@ -1824,3 +1824,28 @@ body {
   font-size: 0.75rem;
   font-family: inherit;
 }
+
+/* Prompt bank status + bulk activate. The counts live above the table because a
+   bank where everything is inactive looks exactly like an empty bank downstream. */
+.prompts-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+}
+
+.prompt-counts { font-size: 0.88rem; color: var(--gray-700); }
+.prompt-counts-cat { color: var(--gray-500); font-size: 0.8rem; }
+
+.prompt-counts-warn {
+  margin-top: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #92400e;
+}

@@ -1697,10 +1697,17 @@ app.post('/api/admin/prompts/upload', requireAdmin, csvUpload.single('csv'), (re
 
     const category = req.body.category || 'csv-batch';
     const texts = records.map(row => (Array.isArray(row) ? row[0] : row.text)).filter(t => t && String(t).trim());
-    const imported = db.createPromptsBatch(texts, category);
+    const { imported, skipped } = db.createPromptsBatch(texts, category);
     const batch = db.createPromptBatch(req.file.originalname, imported);
 
-    res.json({ success: true, imported, batch_id: batch.lastInsertRowid });
+    res.json({
+      success: true,
+      imported,
+      skipped,
+      received: texts.length,
+      batch_id: batch.lastInsertRowid,
+      stats: db.getPromptStats(),
+    });
   } catch (err) {
     console.error('[API] POST /api/admin/prompts/upload:', err.message);
     res.status(500).json({ success: false, error: 'Server error' });
@@ -1708,6 +1715,32 @@ app.post('/api/admin/prompts/upload', requireAdmin, csvUpload.single('csv'), (re
 });
 
 // Toggle prompt active/inactive
+// Turn every prompt on (or off) in one request.
+//
+// The per-prompt PATCH below is fine for a handful, but the global API limiter is
+// 150 requests/minute, so flipping a bank of a thousand one at a time takes minutes
+// and locks the admin out of everything else meanwhile. This is also the supported
+// alternative to running UPDATE against the database file by hand, which does not
+// survive: the server keeps the database in memory and rewrites the file on its own
+// schedule, so an external edit is silently discarded.
+app.post('/api/admin/prompts/bulk-active', requireAdmin, (req, res) => {
+  try {
+    const { active, category } = req.body || {};
+    if (active !== 0 && active !== 1 && active !== true && active !== false) {
+      return res.status(400).json({ success: false, error: 'مقدار active باید ۰ یا ۱ باشد.' });
+    }
+    const scope = typeof category === 'string' && category.trim() ? category.trim() : null;
+    const changed = db.setAllPromptsActive(active ? 1 : 0, scope);
+    // Flush immediately: this is a recovery action and must not be lost to a crash
+    // inside the debounce window.
+    db.flushIfDirty();
+    res.json({ success: true, changed, category: scope, stats: db.getPromptStats() });
+  } catch (err) {
+    console.error('[API] POST /api/admin/prompts/bulk-active:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 app.patch('/api/admin/prompts/:id', requireAdmin, (req, res) => {
   try {
     const { active } = req.body;

@@ -184,6 +184,20 @@
           <button type="submit" class="btn btn-sm btn-primary">+ افزودن متن</button>
         </form>
 
+        <!-- Bulk active/inactive. A bank where every prompt is inactive looks exactly
+             like an empty bank to volunteers, so the counts are shown here always. -->
+        <div class="prompts-toolbar">
+          <div id="promptCounts" class="prompt-counts">در حال بارگذاری...</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button type="button" id="btnActivateAllPrompts" class="btn btn-sm btn-success">
+              ✅ فعال‌سازی همه متن‌ها
+            </button>
+            <button type="button" id="btnDeactivateAllPrompts" class="btn btn-sm btn-outline" style="color:var(--danger); border-color:var(--gray-300);">
+              ⏸️ غیرفعال‌سازی همه
+            </button>
+          </div>
+        </div>
+
         <div style="overflow-x:auto;">
           <table class="prompts-table">
             <thead>

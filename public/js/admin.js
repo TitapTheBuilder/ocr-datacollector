@@ -1424,16 +1424,89 @@
   };
 
   // --- Prompts ---
+  const promptCounts = document.getElementById('promptCounts');
+  const btnActivateAllPrompts = document.getElementById('btnActivateAllPrompts');
+  const btnDeactivateAllPrompts = document.getElementById('btnDeactivateAllPrompts');
+
+  // An all-inactive bank is indistinguishable from an empty one on the volunteer
+  // side, so the admin needs to see the split without opening the table.
+  function renderPromptCounts(prompts) {
+    if (!promptCounts) return;
+    const total = prompts.length;
+    const active = prompts.filter(p => p.active).length;
+    const inactive = total - active;
+
+    const byCat = {};
+    for (const p of prompts) {
+      const key = p.category || 'custom';
+      if (!byCat[key]) byCat[key] = { total: 0, active: 0 };
+      byCat[key].total++;
+      if (p.active) byCat[key].active++;
+    }
+    const catText = Object.entries(byCat)
+      .map(([cat, c]) => `${escapeHtml(cat)}: ${c.active}/${c.total}`)
+      .join(' · ');
+
+    const warn = total > 0 && active === 0
+      ? '<div class="prompt-counts-warn">⚠️ هیچ متن فعالی وجود ندارد — برای مشارکت‌کنندگان هیچ برگه‌ای ساخته نمی‌شود.</div>'
+      : (inactive > 0 ? `<div class="prompt-counts-warn">⚠️ ${inactive} متن غیرفعال است.</div>` : '');
+
+    promptCounts.innerHTML =
+      `<strong>${active}</strong> فعال از <strong>${total}</strong> متن`
+      + (catText ? ` <span class="prompt-counts-cat">(${catText})</span>` : '')
+      + warn;
+  }
+
+  async function setAllPromptsActive(active) {
+    const label = active ? 'فعال' : 'غیرفعال';
+    if (!confirm(`آیا از ${label} کردن «همه» متن‌ها اطمینان دارید؟`)) return;
+    const btn = active ? btnActivateAllPrompts : btnDeactivateAllPrompts;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch('/api/admin/prompts/bulk-active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: active ? 1 : 0 }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`${data.changed} متن ${label} شد. اکنون ${data.stats.active} از ${data.stats.total} متن فعال است.`);
+        loadPrompts();
+        loadStats();
+      } else {
+        alert('خطا: ' + (data.error || 'نامشخص'));
+      }
+    } catch (err) {
+      alert('خطا در ارتباط با سرور: ' + err.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  if (btnActivateAllPrompts) btnActivateAllPrompts.addEventListener('click', () => setAllPromptsActive(true));
+  if (btnDeactivateAllPrompts) btnDeactivateAllPrompts.addEventListener('click', () => setAllPromptsActive(false));
+
   async function loadPrompts() {
     try {
       const res = await fetch('/api/admin/prompts');
+      // An expired session returns 401 and used to land in the silent catch below,
+      // leaving an empty table that looks exactly like "all my prompts are gone".
+      if (res.status === 401) {
+        loginSection.style.display = 'block';
+        dashboardSection.style.display = 'none';
+        btnLogout.style.display = 'none';
+        throw new Error('نشست شما منقضی شده است. لطفاً دوباره وارد شوید.');
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const prompts = await res.json();
       if (!prompts || prompts.length === 0) {
         promptsList.innerHTML = '';
         promptsEmpty.style.display = 'block';
+        renderPromptCounts([]);
         return;
       }
       promptsEmpty.style.display = 'none';
+      renderPromptCounts(prompts);
       promptsList.innerHTML = prompts.map(p => `
         <tr>
           <td>${escapeHtml(p.text)}</td>
@@ -1447,8 +1520,16 @@
           </td>
         </tr>
       `).join('');
-    } catch {
-      // silent
+    } catch (err) {
+      // Never fail silently here: an empty prompt table is indistinguishable from a
+      // lost prompt bank, and that ambiguity costs far more than a visible error.
+      promptsList.innerHTML = '';
+      promptsEmpty.style.display = 'none';
+      if (promptCounts) {
+        promptCounts.innerHTML =
+          `<span style="color:var(--danger); font-weight:600;">خطا در بارگذاری متن‌ها: ${escapeHtml(err && err.message)}</span>`;
+      }
+      console.error('loadPrompts failed:', err);
     }
   }
 
@@ -1520,7 +1601,16 @@
       const res = await fetch('/api/admin/prompts/upload', { method: 'POST', body: formData });
       const data = await res.json();
       if (data.success) {
-        alert(`${data.imported} متن با موفقیت اضافه شد.`);
+        let msg = `${data.imported} متن با موفقیت اضافه شد.`;
+        if (data.skipped) {
+          msg += `
+${data.skipped} مورد تکراری بود و اضافه نشد (از ${data.received} سطر فایل).`;
+        }
+        if (data.stats) {
+          msg += `
+مجموع متن‌ها: ${data.stats.active} فعال از ${data.stats.total}.`;
+        }
+        alert(msg);
         csvInput.value = '';
         loadPrompts();
       } else {

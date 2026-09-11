@@ -179,8 +179,17 @@ async function initDatabase() {
 function wipeLegacySingleWordData() {
   if (getSetting('sheet_migration_done') === '1') return;
 
+  // Only ever touch PRE-SHEET rows, identified by having no assignment_id.
+  //
+  // This used to select every row in `images` and rely solely on the settings flag
+  // above to stop it running twice. That made a settings row the only thing standing
+  // between a restart and the loss of every current upload: restore an older database
+  // file, or lose the settings table, and the flag is gone while the images are not —
+  // so the migration would "migrate" live sheet uploads into uploads/legacy/ and
+  // delete their rows. The flag is now an optimisation; the WHERE clause is the
+  // actual guarantee.
   const legacyDir = path.join(config.UPLOAD_DIR, 'legacy');
-  const rows = all(`SELECT id, filename FROM images`);
+  const rows = all(`SELECT id, filename FROM images WHERE assignment_id IS NULL`);
 
   if (rows.length > 0) {
     fs.mkdirSync(legacyDir, { recursive: true });
@@ -192,13 +201,12 @@ function wipeLegacySingleWordData() {
         }
       }
     }
-    db.run(`DELETE FROM images`);
-    db.run(`DELETE FROM segments`);
-    db.run(`DELETE FROM assignment_items`);
-    db.run(`DELETE FROM assignments`);
-    try {
-      db.run(`UPDATE sqlite_sequence SET seq = 0 WHERE name IN ('images','segments','assignments','assignment_items')`);
-    } catch (_) {}
+    const ids = rows.map(r => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    // Scoped to the rows actually being removed — never the whole table. Assignments
+    // are left alone entirely: they belong to the sheet era, not the legacy one.
+    db.run(`DELETE FROM segments WHERE image_id IN (${placeholders})`, ids);
+    db.run(`DELETE FROM images WHERE id IN (${placeholders})`, ids);
   }
 
   setSetting('sheet_migration_done', '1');
@@ -680,16 +688,41 @@ function deletePrompt(id) {
   return run(`DELETE FROM prompts WHERE id = ?`, [id]);
 }
 
+// Comparison key for "is this the same line?". Trims, collapses whitespace, and
+// unifies the Arabic/Persian codepoints that render identically — two prompts
+// differing only by ي vs ی are the same sentence, and counting them separately
+// silently halves the coverage they were supposed to buy. Only the KEY is
+// normalised; the prompt is stored exactly as written.
+function promptDedupKey(text) {
+  return String(text)
+    .replace(/[‌‍‎‏﻿]/g, '')
+    .replace(/[يى]/g, 'ی')
+    .replace(/ك/g, 'ک')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Returns { imported, skipped }. Duplicates are skipped rather than inserted, both
+// against the existing bank and within the uploaded file itself, and the skipped
+// count is reported so a mostly-duplicate upload is visible instead of silent.
 function createPromptsBatch(texts, category) {
-  if (!texts || texts.length === 0) return 0;
+  if (!texts || texts.length === 0) return { imported: 0, skipped: 0 };
+
+  const seen = new Set(all(`SELECT text FROM prompts`).map(r => promptDedupKey(r.text)));
+
   db.run('BEGIN TRANSACTION');
-  let count = 0;
+  let imported = 0;
+  let skipped = 0;
   try {
     for (const text of texts) {
-      if (text && text.trim()) {
-        db.run(`INSERT INTO prompts (text, category) VALUES (?, ?)`, [text.trim(), category || 'custom']);
-        count++;
-      }
+      if (!text || !String(text).trim()) continue;
+      const clean = String(text).trim();
+      const key = promptDedupKey(clean);
+      if (!key || seen.has(key)) { skipped++; continue; }
+      seen.add(key);
+      db.run(`INSERT INTO prompts (text, category) VALUES (?, ?)`, [clean, category || 'custom']);
+      imported++;
     }
     db.run('COMMIT');
   } catch (err) {
@@ -697,7 +730,32 @@ function createPromptsBatch(texts, category) {
     throw err;
   }
   markDirty();
-  return count;
+  return { imported, skipped };
+}
+
+// Flip every prompt's active flag in one statement, optionally limited to one
+// category. This exists so nobody has to reach for raw SQL against the database
+// file: sql.js holds the whole database in memory and rewrites the file on its own
+// schedule, so an external UPDATE against the file is silently overwritten by the
+// running server — and an UPDATE without a WHERE clause takes the whole bank with it.
+function setAllPromptsActive(active, category) {
+  const flag = active ? 1 : 0;
+  if (category) {
+    return run(`UPDATE prompts SET active = ? WHERE category = ?`, [flag, category]).changes;
+  }
+  return run(`UPDATE prompts SET active = ?`, [flag]).changes;
+}
+
+function getPromptStats() {
+  const total = get(`SELECT COUNT(*) AS c FROM prompts`).c;
+  const active = get(`SELECT COUNT(*) AS c FROM prompts WHERE active = 1`).c;
+  const byCategory = all(`
+    SELECT category,
+           COUNT(*) AS total,
+           SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS active
+    FROM prompts GROUP BY category ORDER BY category
+  `);
+  return { total, active, inactive: total - active, byCategory };
 }
 
 function createPromptBatch(filename, rowCount) {
@@ -1073,6 +1131,9 @@ module.exports = {
   getPromptById,
   createPrompt,
   createPromptsBatch,
+  promptDedupKey,
+  setAllPromptsActive,
+  getPromptStats,
   countPromptImages,
   togglePrompt,
   deletePrompt,

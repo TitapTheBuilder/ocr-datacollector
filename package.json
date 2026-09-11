@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/test-all-14-bugs.js && node tests/test-sheet-flow.js && node tests/test-segment-shapes.js",
+    "test": "node tests/test-migration-safety.js && node tests/test-all-14-bugs.js && node tests/test-sheet-flow.js && node tests/test-segment-shapes.js",
     "test:sheets": "node tests/test-sheet-flow.js",
     "test:shapes": "node tests/test-segment-shapes.js",
     "generate-password": "node -e \"const c=require('crypto');const salt=c.randomBytes(16).toString('hex');const hash=c.scryptSync(process.argv[1]||'admin123',salt,64).toString('hex');console.log('ADMIN_PASSWORD_HASH='+salt+':'+hash)\""
