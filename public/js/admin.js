@@ -212,6 +212,7 @@
       else if (tab.dataset.tab === 'all') loadAll();
       else if (tab.dataset.tab === 'prompts') loadPrompts();
       else if (tab.dataset.tab === 'sync') loadSync();
+      else if (tab.dataset.tab === 'manual') loadWriters();
     });
   });
 
@@ -291,7 +292,7 @@
         <div class="image-card-info">
           <div class="prompt-text">${sheetLabel(img)}</div>
           <div class="meta">
-            <div>${segmentBadge(img)}</div>
+            <div class="seg-badge-slot">${segmentBadge(img)}</div>
             <div>نویسنده: <strong style="color:var(--gray-900);">${authorName}</strong></div>
             <div style="font-size:0.75rem; color:var(--gray-500); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="شناسه: ${authorId}">شناسه: ${authorId}</div>
             <div>${formatDate(img.created_at)}</div>
@@ -1958,9 +1959,12 @@ ${data.skipped} مورد تکراری بود و اضافه نشد (از ${data.r
         if (img.id !== imageId) continue;
         if (typeof segmentCount === 'number') img.segment_count = segmentCount;
         if (typeof totalLines === 'number') img.line_count = totalLines;
+        // Target the slot, not the badge itself: a sheet uploaded with no lines yet
+        // renders an EMPTY slot, so looking for `.seg-badge` would find nothing and
+        // the count would stay blank even after its lines were added.
         const card = document.querySelector(`.image-card[data-id="${imageId}"]`);
-        const badge = card && card.querySelector('.seg-badge');
-        if (badge) badge.outerHTML = segmentBadge(img);
+        const slot = card && card.querySelector('.seg-badge-slot');
+        if (slot) slot.innerHTML = segmentBadge(img);
       }
     }
   }
@@ -1978,6 +1982,152 @@ ${data.skipped} مورد تکراری بود و اضافه نشد (از ${data.r
     if (!total) return '';
     const cls = done >= total ? 'seg-badge complete' : (done > 0 ? 'seg-badge partial' : 'seg-badge none');
     return `<span class="${cls}">برش سطرها: ${done} از ${total}</span>`;
+  }
+
+
+  // --- Manual sheet recovery ---
+  //
+  // Sheets that were still waiting for review when their rows were lost carry no
+  // labels in any export, so this is the only way back for them. The writer id is the
+  // important field: filing several sheets in one handwriting under one id is what
+  // keeps writer-disjoint train/test splits possible later.
+
+  const manualSheetForm = document.getElementById('manualSheetForm');
+  const manualWriter = document.getElementById('manualWriter');
+  const manualWriterName = document.getElementById('manualWriterName');
+  const manualCategory = document.getElementById('manualCategory');
+  const manualImage = document.getElementById('manualImage');
+  const manualLabels = document.getElementById('manualLabels');
+  const manualMsg = document.getElementById('manualMsg');
+  const btnManualUpload = document.getElementById('btnManualUpload');
+
+  function showManualMsg(text, type) {
+    if (!manualMsg) return;
+    manualMsg.textContent = text;
+    manualMsg.className = 'status-msg active ' + (type || 'info');
+  }
+
+  async function loadWriters() {
+    if (!manualWriter) return;
+    try {
+      const res = await fetch('/api/admin/contributors');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const writers = await res.json();
+      const current = manualWriter.value;
+      manualWriter.innerHTML = '<option value="">— نویسنده جدید —</option>'
+        + writers.map(w =>
+            `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name || w.id)} (${w.sheet_count} برگه)</option>`
+          ).join('');
+      manualWriter.value = current;
+    } catch (err) {
+      showManualMsg('خطا در دریافت فهرست نویسندگان: ' + err.message, 'error');
+    }
+  }
+
+  if (manualSheetForm) {
+    manualSheetForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const file = manualImage.files[0];
+      if (!file) { showManualMsg('لطفاً تصویر برگه را انتخاب کنید.', 'error'); return; }
+
+      const writerId = manualWriter.value;
+      const writerName = manualWriterName.value.trim();
+      if (!writerId && writerName.length < 2) {
+        showManualMsg('برای نویسنده جدید، نام را وارد کنید یا یک نویسنده موجود را انتخاب نمایید.', 'error');
+        return;
+      }
+
+      const labels = manualLabels.value.split(/\r?\n/).map(t => t.trim()).filter(Boolean);
+
+      btnManualUpload.disabled = true;
+      showManualMsg('در حال بارگذاری...', 'info');
+      try {
+        const fd = new FormData();
+        fd.append('image', file);
+        fd.append('category', manualCategory.value);
+        if (writerId) fd.append('contributor_id', writerId);
+        if (writerName) fd.append('contributor_name', writerName);
+        if (labels.length) fd.append('labels', labels.join('\n'));
+
+        const res = await fetch('/api/admin/sheets/manual', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!data.success) { showManualMsg('خطا: ' + (data.error || 'نامشخص'), 'error'); return; }
+
+        showManualMsg(
+          data.waiting
+            ? `برگه ثبت شد (شناسه ${data.image_id}) و در وضعیت «در انتظار» قرار گرفت. هر زمان خواستید متن سطرها را اضافه و آن را برش بزنید.`
+            : `برگه ثبت شد (شناسه ${data.image_id}) با ${data.lines} سطر. اکنون می‌توانید از تب «در انتظار بررسی» آن را برش بزنید.`,
+          'success'
+        );
+        manualSheetForm.reset();
+        manualImage.value = '';
+        loadWriters();
+        loadStats();
+        loadPending();
+      } catch (err) {
+        showManualMsg('خطا در ارتباط با سرور: ' + err.message, 'error');
+      } finally {
+        btnManualUpload.disabled = false;
+      }
+    });
+  }
+
+  // --- Editing a sheet's line texts from inside the review modal ---
+  const segEditLines = document.getElementById('segEditLines');
+  const segLinesEditor = document.getElementById('segLinesEditor');
+  const segLinesText = document.getElementById('segLinesText');
+  const segLinesSave = document.getElementById('segLinesSave');
+  const segLinesCancel = document.getElementById('segLinesCancel');
+
+  if (segEditLines) {
+    segEditLines.addEventListener('click', () => {
+      if (!seg.data) return;
+      segLinesText.value = seg.data.lines.map(l => l.text).join('\n');
+      segLinesEditor.style.display = 'block';
+      segEditLines.style.display = 'none';
+      segLinesText.focus();
+    });
+  }
+
+  if (segLinesCancel) {
+    segLinesCancel.addEventListener('click', () => {
+      segLinesEditor.style.display = 'none';
+      segEditLines.style.display = 'block';
+    });
+  }
+
+  if (segLinesSave) {
+    segLinesSave.addEventListener('click', async () => {
+      if (!seg.data) return;
+      const labels = segLinesText.value.split(/\r?\n/).map(t => t.trim()).filter(Boolean);
+      if (!labels.length && !confirm('هیچ سطری وارد نشده است. همه سطرها و برش‌های این برگه حذف شوند؟')) return;
+
+      segLinesSave.disabled = true;
+      try {
+        await flushSegmentSave();
+        const res = await fetch(`/api/admin/images/${seg.data.image.id}/lines`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ labels }),
+        });
+        const data = await res.json();
+        if (!data.success) { alert('خطا: ' + (data.error || 'نامشخص')); return; }
+
+        seg.data.lines = data.lineList;
+        seg.activeLine = null;
+        segLinesEditor.style.display = 'none';
+        segEditLines.style.display = 'block';
+        renderSegList();
+        renderModalActions(seg.data.image);
+        updateCachedSegmentCount(seg.data.image.id, null, data.lines);
+        segDraw();
+        loadStats();
+      } catch (err) {
+        alert('خطا در ارتباط با سرور: ' + err.message);
+      } finally {
+        segLinesSave.disabled = false;
+      }
+    });
   }
 
   // --- Helpers ---

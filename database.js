@@ -539,6 +539,107 @@ function getContributorProgress(contributorId) {
   return { sentences, numbers, total: sentences + numbers };
 }
 
+// --- Manually recovered sheets ---
+//
+// A sheet that was still waiting for review when its rows were lost has no labels
+// anywhere: exports only ever contain approved rows, and the assignment holding its
+// line list is gone. The image file survives though, so an admin who can read the
+// handwriting can put it back by hand. These helpers exist for that path, and for any
+// sheet photographed outside the volunteer flow.
+//
+// Such a sheet still gets a real assignment, because assignment_id is what marks a row
+// as sheet-era; without one the legacy migration would treat it as pre-sheet data.
+
+// Find a prompt whose text matches, or create one. assignment_items.prompt_id is NOT
+// NULL, so a hand-typed label has to become a prompt row. It is created INACTIVE: the
+// line was written once, but a label recovered from a photo should not silently enter
+// the rotation and be handed to the next volunteer.
+function resolveOrCreatePrompt(text, category) {
+  const clean = String(text).trim();
+  if (!clean) return null;
+  const key = promptDedupKey(clean);
+
+  for (const row of all(`SELECT id, text FROM prompts`)) {
+    if (promptDedupKey(row.text) === key) return row.id;
+  }
+  const result = run(
+    `INSERT INTO prompts (text, category, active) VALUES (?, ?, 0)`,
+    [clean, category === 'numbers' ? 'numbers' : 'recovered']
+  );
+  return result.lastInsertRowid;
+}
+
+// Replace a sheet's expected line list. Used both when a manual sheet is created with
+// its labels and when an admin fills them in later for one parked as "waiting".
+function setAssignmentItems(assignmentId, texts, category) {
+  const assignment = getAssignment(assignmentId);
+  if (!assignment) {
+    throw Object.assign(new Error('برگه یافت نشد.'), { statusCode: 404 });
+  }
+
+  run(`DELETE FROM assignment_items WHERE assignment_id = ?`, [assignmentId]);
+
+  let lineNo = 0;
+  let created = 0;
+  for (const text of texts) {
+    const clean = String(text || '').trim();
+    if (!clean) continue;
+    const promptId = resolveOrCreatePrompt(clean, category || assignment.category);
+    if (!promptId) continue;
+    lineNo++;
+    db.run(
+      `INSERT INTO assignment_items (assignment_id, prompt_id, line_no) VALUES (?, ?, ?)`,
+      [assignmentId, promptId, lineNo]
+    );
+    created++;
+  }
+  markDirty();
+  return created;
+}
+
+// Create the assignment + image row for a sheet the admin uploaded directly.
+// `texts` may be empty, which parks the sheet in the waiting state with no lines yet.
+function createManualSheet(data) {
+  const category = data.category === 'numbers' ? 'numbers' : 'sentences';
+
+  createContributor(data.contributorId, data.contributorName || null, 'admin-upload');
+
+  const assignment = run(
+    `INSERT INTO assignments (contributor_id, category, status, submitted_at)
+     VALUES (?, ?, 'submitted', datetime('now'))`,
+    [data.contributorId, category]
+  );
+  const assignmentId = assignment.lastInsertRowid;
+
+  const image = run(`
+    INSERT INTO images (filename, original_name, contributor_id, status, mime_type, file_size,
+                        file_hash, ip_address, assignment_id, sheet_category)
+    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+  `, [
+    data.filename, data.originalName || null, data.contributorId,
+    data.mimeType || null, data.fileSize || 0, data.fileHash || null,
+    data.ipAddress || null, assignmentId, category,
+  ]);
+  const imageId = image.lastInsertRowid;
+
+  run(`UPDATE assignments SET image_id = ? WHERE id = ?`, [imageId, assignmentId]);
+
+  const lines = setAssignmentItems(assignmentId, data.texts || [], category);
+  return { imageId, assignmentId, lines };
+}
+
+// Writers who already exist, so several recovered sheets from the same hand can be
+// filed under one id — writer identity is what keeps train/test splits honest.
+function getAllContributors() {
+  return all(`
+    SELECT c.id, c.name, COUNT(i.id) AS sheet_count
+    FROM contributors c
+    LEFT JOIN images i ON i.contributor_id = c.id
+    GROUP BY c.id
+    ORDER BY sheet_count DESC, c.id ASC
+  `);
+}
+
 // --- Segments (admin-drawn crops) ---
 
 // `quad` and `erase` are stored as JSON text. Callers work with real arrays, so
@@ -1117,6 +1218,10 @@ module.exports = {
   markAssignmentSubmitted,
   reopenAssignmentForImage,
   getContributorSheetState,
+  createManualSheet,
+  setAssignmentItems,
+  resolveOrCreatePrompt,
+  getAllContributors,
   startNewSheetSet,
   // Segments
   getSegments,

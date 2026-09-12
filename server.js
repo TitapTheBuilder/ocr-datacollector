@@ -812,6 +812,174 @@ function deleteSegmentFile(filename) {
   }
 }
 
+// --- Manually recovered / admin-uploaded sheets ---
+//
+// Sheets that were still waiting for review when their rows were lost have no labels
+// in any export, so they can only come back by hand. This lets an admin upload the
+// image, file it under a writer id (so several sheets in the same handwriting stay
+// grouped — writer identity is what keeps train/test splits honest), and either type
+// the line labels straight away or park it in the waiting state and label it later.
+//
+// The image goes through EXACTLY the same processing as a volunteer upload. That is
+// not incidental: a sheet that skipped the re-encode would carry a different encoding
+// signature from every other sheet, which is precisely the kind of cue that makes a
+// corpus trivially separable from itself.
+async function reencodeUploadedImage(file) {
+  const fileBuffer = fs.readFileSync(file.path);
+  const detectedMime = security.validateMagicBytes(fileBuffer);
+  if (!detectedMime) {
+    throw Object.assign(new Error('فایل ارسالی تصویر معتبر نیست یا فرمت آن پشتیبانی نمی‌شود.'), { statusCode: 400 });
+  }
+
+  let finalMime = detectedMime;
+  let cleanBuffer;
+  try {
+    const sharpInstance = sharp(fileBuffer).rotate();
+    if (detectedMime === 'image/jpeg') {
+      cleanBuffer = await sharpInstance.jpeg({ quality: 90 }).toBuffer();
+      finalMime = 'image/jpeg';
+    } else if (detectedMime === 'image/webp') {
+      cleanBuffer = await sharpInstance.webp({ quality: 90 }).toBuffer();
+      finalMime = 'image/webp';
+    } else {
+      cleanBuffer = await sharpInstance.png({ compressionLevel: 8 }).toBuffer();
+      finalMime = 'image/png';
+    }
+
+    const targetExt = detectedMime === 'image/png' ? '.png' : detectedMime === 'image/webp' ? '.webp' : '.jpg';
+    if (path.extname(file.filename).toLowerCase() !== targetExt) {
+      const oldPath = file.path;
+      file.filename = file.filename.replace(/\.[^/.]+$/, '') + targetExt;
+      file.path = path.join(path.dirname(oldPath), file.filename);
+      if (fs.existsSync(oldPath)) {
+        try { fs.unlinkSync(oldPath); } catch (_) {}
+      }
+    }
+    fs.writeFileSync(file.path, cleanBuffer);
+  } catch (err) {
+    if (err.statusCode) throw err;
+    console.error('[API] Sharp processing error:', err.message);
+    throw Object.assign(new Error('تصویر ارسالی قابل پردازش نیست یا محتوای آن آسیب دیده است.'), { statusCode: 400 });
+  }
+
+  const fileHash = await security.computeFileHash(cleanBuffer);
+  return { filename: file.filename, mimeType: finalMime, fileSize: cleanBuffer.length, fileHash };
+}
+
+// Writers to choose from when filing a recovered sheet.
+app.get('/api/admin/contributors', requireAdmin, (req, res) => {
+  try {
+    res.json(db.getAllContributors());
+  } catch (err) {
+    console.error('[API] GET /api/admin/contributors:', err.message);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+app.post('/api/admin/sheets/manual', requireAdmin, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'تصویری ارسال نشد.' });
+
+    const rawId = String(req.body?.contributor_id || '').trim().toLowerCase();
+    const contributorName = req.body?.contributor_name ? String(req.body.contributor_name).trim() : null;
+    const contributorId = rawId || formatContributorId(contributorName || '');
+    if (!contributorId || contributorId.length < 2) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ success: false, error: 'شناسه یا نام نویسنده الزامی است.' });
+    }
+
+    const category = req.body?.category === 'numbers' ? 'numbers' : 'sentences';
+
+    // Labels are optional: without them the sheet is parked as "waiting" and can be
+    // labelled later, which is the point of the waiting state.
+    let texts = [];
+    if (req.body?.labels) {
+      texts = String(req.body.labels)
+        .split(/\r?\n/)
+        .map(t => t.trim())
+        .filter(Boolean);
+    }
+    if (texts.length > 100) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ success: false, error: 'حداکثر ۱۰۰ سطر برای یک برگه مجاز است.' });
+    }
+
+    const processed = await reencodeUploadedImage(req.file);
+
+    const duplicate = db.findByFileHash(processed.fileHash);
+    if (duplicate) {
+      if (fs.existsSync(req.file.path)) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+      return res.status(409).json({
+        success: false,
+        error: `این تصویر قبلاً در سامانه ثبت شده است (شناسه ${duplicate.id}).`,
+      });
+    }
+
+    const result = db.createManualSheet({
+      ...processed,
+      originalName: req.file.originalname,
+      contributorId,
+      contributorName,
+      category,
+      texts,
+      ipAddress: security.getClientIp(req),
+    });
+    db.flushIfDirty();
+
+    res.json({
+      success: true,
+      image_id: result.imageId,
+      lines: result.lines,
+      waiting: result.lines === 0,
+      contributor_id: contributorId,
+    });
+  } catch (err) {
+    console.error('[API] POST /api/admin/sheets/manual:', err.message);
+    if (req.file && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+    }
+    const code = err.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
+    res.status(code).json({ success: false, error: code < 500 ? err.message : 'خطای سرور' });
+  }
+});
+
+// Set or replace the expected line texts of a sheet, so one parked as waiting can be
+// labelled afterwards. Segments whose line number no longer exists are removed along
+// with their crops, otherwise the sheet would keep crops for lines it no longer has.
+app.put('/api/admin/images/:id/lines', requireAdmin, (req, res) => {
+  try {
+    const image = db.getImage(req.params.id);
+    if (!image) return res.status(404).json({ success: false, error: 'Image not found' });
+    if (!image.assignment_id) {
+      return res.status(400).json({ success: false, error: 'این ارسال قدیمی است و سطرهای قابل ویرایش ندارد.' });
+    }
+
+    const labels = Array.isArray(req.body?.labels)
+      ? req.body.labels
+      : String(req.body?.labels || '').split(/\r?\n/);
+    const texts = labels.map(t => String(t || '').trim()).filter(Boolean);
+    if (texts.length > 100) {
+      return res.status(400).json({ success: false, error: 'حداکثر ۱۰۰ سطر برای یک برگه مجاز است.' });
+    }
+
+    const count = db.setAssignmentItems(image.assignment_id, texts, image.sheet_category);
+
+    for (const seg of db.getSegments(image.id)) {
+      if (seg.line_no > count) {
+        const removed = db.deleteSegment(image.id, seg.line_no);
+        if (removed) deleteSegmentFile(removed.filename);
+      }
+    }
+    db.flushIfDirty();
+
+    res.json({ success: true, lines: count, lineList: db.getImageLines(image.id) });
+  } catch (err) {
+    console.error('[API] PUT /api/admin/images/:id/lines:', err.message);
+    const code = err.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
+    res.status(code).json({ success: false, error: code < 500 ? err.message : 'Server error' });
+  }
+});
+
 // --- Segment geometry ---
 //
 // Volunteers do not write in perfectly straight lines, so a line's shape is four

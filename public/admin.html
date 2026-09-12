@@ -88,6 +88,7 @@
       <button class="tab active" data-tab="pending">در انتظار بررسی</button>
       <button class="tab" data-tab="all">همه تصاویر</button>
       <button class="tab" data-tab="prompts">مدیریت متن‌ها</button>
+      <button class="tab" data-tab="manual">بازیابی دستی برگه</button>
       <button class="tab" data-tab="sync">همگام‌سازی</button>
     </div>
 
@@ -214,6 +215,70 @@
         <div id="promptsEmpty" class="empty-state" style="display:none;">
           <p>هنوز متنی اضافه نشده است</p>
         </div>
+      </div>
+    </div>
+
+    <!-- Manual sheet recovery -->
+    <div id="tabManual" class="tab-content">
+      <div class="prompts-section">
+        <div class="prompts-header">
+          <h3>بازیابی دستی یک برگه</h3>
+        </div>
+
+        <p style="color:var(--gray-500); font-size:0.88rem; line-height:1.9; margin-bottom:16px;">
+          برگه‌هایی که هنگام تهیه خروجی هنوز «در انتظار بررسی» بوده‌اند، برچسبی در فایل خروجی ندارند و
+          فقط به‌صورت دستی قابل بازیابی هستند. تصویر برگه را اینجا بارگذاری کنید، آن را به یک
+          <strong>نویسنده</strong> نسبت دهید (برای اینکه برگه‌های یک دست‌خط زیر یک شناسه بمانند)، و
+          متن سطرها را وارد کنید. اگر فعلاً متن‌ها را ندارید، فیلد متن را <strong>خالی بگذارید</strong>
+          تا برگه در وضعیت «در انتظار» ذخیره شود و بعداً برچسب‌گذاری شود.
+        </p>
+
+        <form id="manualSheetForm">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+            <div class="form-group">
+              <label for="manualWriter">نویسنده (شناسه دست‌خط)</label>
+              <select id="manualWriter" class="form-input">
+                <option value="">— نویسنده جدید —</option>
+              </select>
+              <small style="color:var(--gray-500); font-size:0.78rem;">
+                برگه‌های یک دست‌خط را زیر یک نویسنده ثبت کنید؛ این شناسه مبنای تفکیک داده‌های آموزش و آزمون است.
+              </small>
+            </div>
+            <div class="form-group">
+              <label for="manualWriterName">نام نویسنده جدید</label>
+              <input type="text" id="manualWriterName" class="form-input" placeholder="مثال: مهدی جدیدی">
+              <small style="color:var(--gray-500); font-size:0.78rem;">فقط وقتی «نویسنده جدید» را انتخاب کرده‌اید لازم است.</small>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="manualCategory">نوع برگه</label>
+            <select id="manualCategory" class="form-input" style="width:auto;">
+              <option value="sentences">جملات و کلمات</option>
+              <option value="numbers">اعداد</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="manualImage">تصویر برگه</label>
+            <input type="file" id="manualImage" class="form-input" accept="image/*" required>
+          </div>
+
+          <div class="form-group">
+            <label for="manualLabels">متن سطرها — هر سطر در یک خط (اختیاری)</label>
+            <textarea id="manualLabels" class="form-input" rows="10" dir="rtl"
+              placeholder="سطر اول&#10;سطر دوم&#10;سطر سوم&#10;...&#10;&#10;خالی بگذارید تا برگه در وضعیت «در انتظار» بماند."></textarea>
+            <small style="color:var(--gray-500); font-size:0.78rem;">
+              ترتیب خطوط باید دقیقاً با ترتیب سطرهای نوشته‌شده روی برگه یکی باشد.
+            </small>
+          </div>
+
+          <div id="manualMsg" class="status-msg" style="margin-bottom:12px;"></div>
+
+          <button type="submit" id="btnManualUpload" class="btn btn-primary">
+            بارگذاری برگه
+          </button>
+        </form>
       </div>
     </div>
 
@@ -434,6 +499,22 @@
             <div class="seg-list-head">
               <span>سطرهای این برگه</span>
               <span id="segProgress" class="seg-progress">۰ از ۰</span>
+            </div>
+            <!-- A manually recovered sheet can arrive with no line list at all, so the
+                 labels have to be editable from inside the review modal. -->
+            <button type="button" id="segEditLines" class="btn btn-outline btn-sm" style="width:100%; margin-bottom:8px;">
+              ✏️ ویرایش متن سطرها
+            </button>
+            <div id="segLinesEditor" style="display:none; margin-bottom:10px;">
+              <textarea id="segLinesText" class="form-input" rows="10" dir="rtl"
+                placeholder="متن هر سطر را در یک خط بنویسید..."></textarea>
+              <div style="display:flex; gap:8px; margin-top:6px;">
+                <button type="button" id="segLinesSave" class="btn btn-primary btn-sm">ذخیره سطرها</button>
+                <button type="button" id="segLinesCancel" class="btn btn-outline btn-sm">انصراف</button>
+              </div>
+              <div style="font-size:0.75rem; color:var(--gray-500); margin-top:6px; line-height:1.8;">
+                تغییر تعداد سطرها، برش‌های سطرهای حذف‌شده را نیز پاک می‌کند.
+              </div>
             </div>
             <ol id="segList" class="seg-list"></ol>
           </div>
